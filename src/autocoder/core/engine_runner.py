@@ -40,5 +40,5 @@ def run_command(command: str, cwd: str) -> bool:
     """跑 shell 命令（测试/构建用）。空命令视为跳过=成功。"""
     if not command:
         return True
-    proc = subprocess.run(command, cwd=cwd, shell=True)
+    proc = subprocess.run(command, cwd=cwd, shell=True, stdin=subprocess.DEVNULL)
     return proc.returncode == 0

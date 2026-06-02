@@ -62,10 +62,14 @@ class Orchestrator:
             age = time.time() - p.stat().st_mtime
             if age < 1800:
                 return False
-            # stale, reclaim
-            p.rmdir()
-            p.mkdir()
-            return True
+            # 锁已过期，尝试回收。rmdir+mkdir 非原子：若另一进程同时回收，
+            # 这里的 mkdir 会再次抛 FileExistsError，让出锁返回 False。
+            try:
+                p.rmdir()
+                p.mkdir()
+                return True
+            except (FileNotFoundError, FileExistsError):
+                return False
 
     def _release_lock(self, record_id):
         p = self._lock_path(record_id)
