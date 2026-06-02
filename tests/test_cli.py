@@ -56,3 +56,17 @@ def test_unknown_command_returns_error(tmp_path):
     cfg_path, _ = _cfg(tmp_path)
     rc = main(["frobnicate", "--config", cfg_path])
     assert rc != 0
+
+
+def test_resume_invokes_orchestrator(tmp_path, monkeypatch):
+    cfg_path, ws = _cfg(tmp_path)
+    main(["add", "给 demo 加功能", "--config", cfg_path])
+    rid = json.loads(next(Path(ws).glob("*/task.json")).read_text())["record_id"]
+
+    called = {}
+    import autocoder.cli as cli_mod
+    monkeypatch.setattr(cli_mod.Orchestrator, "resume",
+                        lambda self, record_id: called.setdefault("rid", record_id))
+    rc = main(["resume", rid, "--config", cfg_path])
+    assert rc == 0
+    assert called["rid"] == rid

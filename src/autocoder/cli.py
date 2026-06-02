@@ -22,6 +22,10 @@ def main(argv=None) -> int:
 
     sub.add_parser("dispatch", parents=[common], help="拉取并处理一条 pending 需求")
 
+    p_resume = sub.add_parser("resume", parents=[common],
+                              help="续跑回退态需求（澄清中/规划中）")
+    p_resume.add_argument("record_id")
+
     p_exec = sub.add_parser("execute", parents=[common], help="执行指定需求")
     p_exec.add_argument("record_id")
 
@@ -49,6 +53,10 @@ def main(argv=None) -> int:
         Orchestrator(cfg, store, notifier, router).dispatch_one()
         return 0
 
+    if args.cmd == "resume":
+        Orchestrator(cfg, store, notifier, router).resume(args.record_id)
+        return 0
+
     if args.cmd == "execute":
         Orchestrator(cfg, store, notifier, router).execute(args.record_id)
         return 0
@@ -65,3 +73,7 @@ def main(argv=None) -> int:
 
     parser.error(f"unknown command: {args.cmd}")
     return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

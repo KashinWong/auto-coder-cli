@@ -15,7 +15,7 @@ def _default_engine_run(spec, working_dir, prompt, log_file):
 
 class _DefaultGit:
     @staticmethod
-    def add_commit_push(worktree_path, commit_msg, branch):
+    def add_commit_push(worktree_path, commit_msg, branch, push=True):
         import subprocess
         subprocess.run(["git", "-C", worktree_path, "add", "-A"], check=False)
         stat = subprocess.run(
@@ -25,11 +25,13 @@ class _DefaultGit:
         change_stats = stat[-1] if stat else ""
         subprocess.run(["git", "-C", worktree_path, "commit", "-m", commit_msg],
                        capture_output=True, text=True)
-        push = subprocess.run(
+        if not push:
+            return True, change_stats
+        pushed = subprocess.run(
             ["git", "-C", worktree_path, "push", "-u", "origin", branch],
             capture_output=True, text=True,
         )
-        return push.returncode == 0, change_stats
+        return pushed.returncode == 0, change_stats
 
 
 class Orchestrator:
@@ -90,19 +92,53 @@ class Orchestrator:
         else:
             raise RuntimeError(f"非法状态转移 {cur} -> {to}")
 
-    # ---- dispatch -----------------------------------------------------
+    # ---- dispatch / resume --------------------------------------------
     def dispatch_one(self):
+        """取一条「待开始」需求，从澄清阶段开始驱动。"""
         pending = self.store.fetch_pending()
         if not pending:
             return
-        task = pending[0]
-        rid = task.record_id
+        rid = pending[0].record_id
         self._set_status(rid, "澄清中")
+        self._drive(rid)
 
-        project_key = self.cfg.match_project(task.description)
-        project_path = (self.cfg.projects[project_key]["path"]
-                        if project_key else "")
+    def resume(self, record_id):
+        """从需求当前状态续跑。供 CLI 模式下回退态（澄清中/规划中）的需求
+        重新进入流程——线性 dispatch 在驳回后会停在回退态，靠本方法续上，
+        而非依赖飞书回调。"""
+        self._drive(record_id)
 
+    def _drive(self, rid):
+        """按当前状态路由到对应阶段，顺序贯穿到下一个卡点或终态。"""
+        status = self.store.get(rid).status
+        if status == "已搁置":
+            self._set_status(rid, "待开始")
+            self._set_status(rid, "澄清中")
+            status = "澄清中"
+        if status == "澄清中":
+            if not self._run_clarify(rid):
+                return
+            status = "待立项"
+        if status == "待立项":
+            if not self._run_charter(rid):
+                return
+            status = "规划中"
+        if status == "规划中":
+            if not self._run_plan(rid):
+                return
+            status = "待审批"
+        if status == "待审批":
+            self._run_plan_approval(rid)
+
+    def _project_for(self, task):
+        key = task.project or self.cfg.match_project(task.description)
+        path = self.cfg.projects[key]["path"] if key else ""
+        return key, path
+
+    def _run_clarify(self, rid) -> bool:
+        """澄清循环。返回 True 表示进入待立项。"""
+        task = self.store.get(rid)
+        _, project_path = self._project_for(task)
         round_no = 1
         while True:
             pred = self.clarify.predict(task.description, project_path)
@@ -114,34 +150,57 @@ class Orchestrator:
             if round_no >= 3:
                 break
             round_no += 1
-
         summary = self.clarify.synthesize(task.description, decision.form)
+        # 持久化摘要，使后续阶段（含 resume）无需重跑澄清即可取回上下文。
+        self.store.update_summary(rid, summary, task.progress or "")
+        # title 缺失时用 description 兜底，避免 commit message 出现 "feat: None"。
+        if not task.task_title:
+            t = self.store.get(rid)
+            t.task_title = t.description
+            self.store._save(t)
         self._set_status(rid, "待立项")
-        self.notifier.send_charter(task, summary)
+        return True
 
+    def _run_charter(self, rid) -> bool:
+        """立项审批。返回 True 表示进入规划中；False 表示停在回退/终态。"""
+        task = self.store.get(rid)
+        self.notifier.send_charter(task, task.summary)
         charter = self.router.await_decision(rid, "charter")
         if charter.action == "reject_charter":
             self._set_status(rid, "已搁置")
-            return
+            return False
         if charter.action in ("revise_charter", "rechat"):
             self._set_status(rid, "澄清中")
-            return  # CLI 模式下交回用户重新触发；飞书模式由回调继续
-        # approve_charter：建 worktree，进规划
+            return False  # 停在回退态，由 resume 续跑
+        project_key, _ = self._project_for(task)
         if not project_key:
             self.notifier.send_failure(task, "立项", "无法匹配目标项目", "", "")
-            return
+            return False
         proj = self.cfg.projects[project_key]
-        wtpath = self.wt.create(proj["path"], proj["base_branch"], rid)
+        self.wt.create(proj["path"], proj["base_branch"], rid)
         self._set_status(rid, "规划中")
-        self._plan(task, project_key, proj, wtpath, summary)
+        return True
 
-        # 方案审批
+    def _run_plan(self, rid) -> bool:
+        """跑规划引擎，产出 spec/plan/tasks。返回 True 表示进入待审批。"""
+        task = self.store.get(rid)
+        project_key, _ = self._project_for(task)
+        proj = self.cfg.projects[project_key]
+        wtpath = self._resolve_wt_by_key(project_key, rid)
+        self._plan(task, project_key, proj, wtpath, task.summary)
+        return True
+
+    def _run_plan_approval(self, rid):
+        """方案审批。批准→入队或执行；退回→设回退态由 resume 续跑。"""
+        task = self.store.get(rid)
+        project_key, _ = self._project_for(task)
+        proj = self.cfg.projects[project_key]
         plan_decision = self.router.await_decision(rid, "plan")
         if plan_decision.action == "approve_plan":
-            active = self.wt.active_count(proj["path"])
+            active = self.wt.active_count(proj["path"], rid)
             if self.wt.gate_open(active, self.cfg.concurrency_limit):
-                self.store.update_status(rid, "进行中") if sm.can_transition(
-                    self.store.get(rid).status, "进行中") else None
+                if sm.can_transition(self.store.get(rid).status, "进行中"):
+                    self.store.update_status(rid, "进行中")
                 self.execute(rid)
             else:
                 self.store.set_queue_position(rid, active)
@@ -150,6 +209,11 @@ class Orchestrator:
         elif plan_decision.action == "reunderstand":
             self.wt.remove(proj["path"], rid)
             self._set_status(rid, "澄清中")
+
+    def _resolve_wt_by_key(self, project_key, rid):
+        proj = self.cfg.projects[project_key]
+        return str(Path(proj["path"]) / ".worktrees" / wt_mod.branch_name(rid))
+
 
     def _plan(self, task, project_key, proj, worktree_path, requirement):
         spec_dir = planner.next_spec_dir(worktree_path, task.task_title or "")
@@ -221,13 +285,15 @@ class Orchestrator:
 
         branch = task.branch_name()
         commit_msg = f"feat: {task.task_title}\n\nAuto-generated by auto-coder\nTask: {record_id}"
-        pushed, change_stats = self.git.add_commit_push(wtpath, commit_msg, branch)
+        push = proj.get("push", True)
+        pushed, change_stats = self.git.add_commit_push(wtpath, commit_msg, branch, push)
         if not pushed:
             self.notifier.send_failure(task, "推送", "push 失败", log, branch)
             self.store.update_status(record_id, "已停滞")
             return
 
         duration = f"{int((time.time() - start) // 60)} 分钟"
-        timeline = f"{task.plan_generated_at or ''} 规划 → {datetime.now():%m-%d %H:%M} 已推送"
-        self.store.complete(record_id, branch, "已完成并推送分支", timeline)
+        done_label = "已推送" if push else "已提交(未推送)"
+        timeline = f"{task.plan_generated_at or ''} 规划 → {datetime.now():%m-%d %H:%M} {done_label}"
+        self.store.complete(record_id, branch, f"已完成并{done_label}分支", timeline)
         self.notifier.send_complete(task, branch, change_stats, duration, timeline)
