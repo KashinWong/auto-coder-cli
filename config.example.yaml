@@ -1,0 +1,53 @@
+adapters:
+  store: json          # json | feishu
+  notifier: cli        # cli | feishu
+  router: cli          # cli | feishu_webhook
+
+workspace_dir: ./workspace/tasks
+
+concurrency:
+  limit: 3
+
+projects:
+  example-project:
+    path: /path/to/your/project
+    engine: claude-code
+    match_keywords: ["关键词1", "关键词2"]
+    base_branch: main
+    test_command: "npm test"
+    build_command: "npm run build"
+    knowledge:
+      - path: /path/to/your/project/docs/
+        label: 技术文档
+        strategy: all
+        include: "*.md"
+
+engines:
+  claude-code:
+    command: claude
+    args: ["--print", "--dangerously-skip-permissions"]
+    timeout: 1800
+    env:
+      CLAUDE_MODEL: your-model-name
+  codex:
+    command: codex
+    args: ["--quiet", "--auto-edit"]
+    timeout: 1800
+    env: {}
+  default: claude-code
+
+clarify_dimensions:
+  - {key: scope,       label: "🎯 范围边界",    source: fixed}
+  - {key: modules,     label: "🧩 涉及模块",    source: agent}
+  - {key: acceptance,  label: "✅ 验收标准",    source: fixed}
+  - {key: constraints, label: "⚙️ 优先级/约束", source: fixed}
+  - {key: risk,        label: "⚠️ 风险点",      source: agent}
+
+# 仅当 adapters.store/notifier = feishu 时需要
+feishu:
+  base_token: YOUR_BASE_TOKEN
+  table_id: YOUR_TABLE_ID
+  notify_chat_id: YOUR_CHAT_ID
+  field_ids:
+    description: fldXXXXXXXX
+    priority: fldXXXXXXXX
