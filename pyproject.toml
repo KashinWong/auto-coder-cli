@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-coder-oss"
+version = "0.1.0"
+description = "Agent 驱动的自动化编码工作流"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+feishu = ["requests>=2.28", "fastapi>=0.100", "uvicorn>=0.23"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+auto-coder = "autocoder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
