@@ -1,0 +1,85 @@
+{
+  "config": {
+    "wide_screen_mode": true
+  },
+  "header": {
+    "template": "blue",
+    "title": {
+      "tag": "plain_text",
+      "content": "📌 需求立项 · {{TASK_TITLE}}"
+    }
+  },
+  "elements": [
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "{{CHARTER_SUMMARY}}"
+      }
+    },
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "action",
+      "actions": [
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "✅ 立项"
+          },
+          "type": "primary",
+          "value": {
+            "ac_action": "approve_charter",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "charter",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "✏️ 改"
+          },
+          "type": "default",
+          "value": {
+            "ac_action": "revise_charter",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "charter",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "💬 再聊"
+          },
+          "type": "default",
+          "value": {
+            "ac_action": "rechat",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "charter",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "❌ 拒"
+          },
+          "type": "danger",
+          "value": {
+            "ac_action": "reject_charter",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "charter",
+            "_skill": "auto-coder-agent"
+          }
+        }
+      ]
+    }
+  ]
+}

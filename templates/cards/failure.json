@@ -1,0 +1,11 @@
+{
+  "config": { "wide_screen_mode": true },
+  "header": {
+    "template": "red",
+    "title": { "tag": "plain_text", "content": "🛑 已停滞 · {{TASK_TITLE}}" }
+  },
+  "elements": [
+    { "tag": "div", "text": { "tag": "lark_md", "content": "**失败阶段**: {{FAIL_STAGE}}\n**错误**: {{ERROR_SUMMARY}}" } },
+    { "tag": "div", "text": { "tag": "lark_md", "content": "**日志**: {{LOG_PATH}}\n**分支(保留现场)**: {{BRANCH_NAME}}" } }
+  ]
+}

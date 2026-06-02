@@ -1,0 +1,78 @@
+{
+  "config": {
+    "wide_screen_mode": true
+  },
+  "header": {
+    "template": "turquoise",
+    "title": {
+      "tag": "plain_text",
+      "content": "🗺️ 方案审批 · {{TASK_TITLE}}"
+    }
+  },
+  "elements": [
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "{{PLAN_SUMMARY}}"
+      }
+    },
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "**任务数**: {{TASKS_COUNT}}　**分支**: {{BRANCH_NAME}}"
+      }
+    },
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "action",
+      "actions": [
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "✅ 批准"
+          },
+          "type": "primary",
+          "value": {
+            "ac_action": "approve_plan",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "plan",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "❌ 退·改方案"
+          },
+          "type": "default",
+          "value": {
+            "ac_action": "revise_plan",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "plan",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "❌ 退·重新理解"
+          },
+          "type": "danger",
+          "value": {
+            "ac_action": "reunderstand",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "plan",
+            "_skill": "auto-coder-agent"
+          }
+        }
+      ]
+    }
+  ]
+}
