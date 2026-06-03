@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -371,9 +372,11 @@ class Orchestrator:
         self.store._save(t)
 
     def _launch_bg(self, *args):
-        """以 auto-coder <args> 后台启动，脱离父进程组，hermes 不会带走它。"""
+        """以 `python -m autocoder.cli <args>` 后台启动，脱离父进程组，
+        hermes 不会带走它。用 sys.executable + -m 而非裸 `auto-coder`：
+        复用当前 venv 的解释器与已装包，绕开「auto-coder 不在子进程 PATH」。"""
         subprocess.Popen(
-            ["auto-coder", *args],
+            [sys.executable, "-m", "autocoder.cli", *args],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
