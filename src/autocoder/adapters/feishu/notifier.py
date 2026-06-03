@@ -3,7 +3,7 @@ from pathlib import Path
 from autocoder.adapters.notifier import Notifier
 from autocoder.adapters.feishu.client import FeishuClient, render_card
 
-_TPL_DIR = Path(__file__).resolve().parents[3] / "templates" / "cards"
+_TPL_DIR = Path(__file__).resolve().parents[4] / "templates" / "cards"
 
 
 class FeishuCardNotifier(Notifier):

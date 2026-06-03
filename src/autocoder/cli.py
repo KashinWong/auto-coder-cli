@@ -1,10 +1,11 @@
 import argparse
+import json
 import sys
 import uuid
 
 from autocoder.factory import build
 from autocoder.core.orchestrator import Orchestrator
-from autocoder.models import Task
+from autocoder.models import Decision, Task
 
 
 def main(argv=None) -> int:
@@ -20,7 +21,8 @@ def main(argv=None) -> int:
     p_add.add_argument("description")
     p_add.add_argument("--priority", default="重要不紧急")
 
-    sub.add_parser("dispatch", parents=[common], help="拉取并处理一条 pending 需求")
+    sub.add_parser("dispatch", parents=[common], help="拉取并处理一条 pending 需求（CLI 阻塞模式）")
+    sub.add_parser("dispatch-feishu", parents=[common], help="飞书模式：发澄清卡后立即返回")
 
     p_resume = sub.add_parser("resume", parents=[common],
                               help="续跑回退态需求（澄清中/规划中）")
@@ -28,6 +30,18 @@ def main(argv=None) -> int:
 
     p_exec = sub.add_parser("execute", parents=[common], help="执行指定需求")
     p_exec.add_argument("record_id")
+
+    p_plan = sub.add_parser("plan", parents=[common], help="（后台）运行规划引擎并发方案卡")
+    p_plan.add_argument("record_id")
+
+    p_advance = sub.add_parser("advance", parents=[common],
+                               help="处理一次飞书卡片点击决策（供 hermes skill 调用）")
+    p_advance.add_argument("record_id")
+    p_advance.add_argument("action")
+    p_advance.add_argument("--stage", default="")
+    p_advance.add_argument("--form", default="{}", help="JSON 字符串，澄清表单")
+    p_advance.add_argument("--input", dest="input_text", default="",
+                           help="单行文本输入（改方案说明等）")
 
     sub.add_parser("status", parents=[common], help="列出所有需求状态")
 
@@ -44,13 +58,20 @@ def main(argv=None) -> int:
 
     if args.cmd == "add":
         rid = uuid.uuid4().hex[:12]
-        store.add(Task(record_id=rid, description=args.description,
-                       priority=args.priority))
-        print(f"已添加需求 {rid}: {args.description}")
+        task = Task(record_id=rid, description=args.description,
+                    priority=args.priority)
+        # FeishuBaseStore.add 返回 bitable 生成的 record_id
+        result = store.add(task)
+        actual_rid = result if isinstance(result, str) else rid
+        print(f"已添加需求 {actual_rid}: {args.description}")
         return 0
 
     if args.cmd == "dispatch":
         Orchestrator(cfg, store, notifier, router).dispatch_one()
+        return 0
+
+    if args.cmd == "dispatch-feishu":
+        Orchestrator(cfg, store, notifier, router).dispatch_feishu()
         return 0
 
     if args.cmd == "resume":
@@ -59,6 +80,26 @@ def main(argv=None) -> int:
 
     if args.cmd == "execute":
         Orchestrator(cfg, store, notifier, router).execute(args.record_id)
+        return 0
+
+    if args.cmd == "plan":
+        Orchestrator(cfg, store, notifier, router).run_plan_and_notify(args.record_id)
+        return 0
+
+    if args.cmd == "advance":
+        try:
+            form = json.loads(args.form) if args.form and args.form.strip() != "{}" else {}
+        except json.JSONDecodeError as e:
+            print(f"--form 解析失败: {e}", file=sys.stderr)
+            return 2
+        decision = Decision(
+            action=args.action,
+            record_id=args.record_id,
+            stage=args.stage,
+            form=form,
+            input_text=args.input_text,
+        )
+        Orchestrator(cfg, store, notifier, router).advance(args.record_id, decision)
         return 0
 
     if args.cmd == "status":

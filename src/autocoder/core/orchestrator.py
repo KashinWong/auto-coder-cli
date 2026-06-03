@@ -1,3 +1,4 @@
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from autocoder.core import worktree as wt_mod
 from autocoder.core import planner
 from autocoder.core.clarify import ClarifyOrchestrator
 from autocoder.core.engine_runner import run_engine, run_command, EngineResult
+from autocoder.models import Decision
 
 
 def _default_engine_run(spec, working_dir, prompt, log_file):
@@ -107,6 +109,135 @@ class Orchestrator:
         重新进入流程——线性 dispatch 在驳回后会停在回退态，靠本方法续上，
         而非依赖飞书回调。"""
         self._drive(record_id)
+
+    # ---- feishu stateless advance (hermes skill model) ----------------
+    def dispatch_feishu(self):
+        """飞书模式：取一条「待开始」需求，发澄清卡后立即返回（不阻塞）。
+        由 hermes cron/消息触发；后续每步靠卡片按钮 → advance() 推进。"""
+        pending = self.store.fetch_pending()
+        if not pending:
+            return
+        task = pending[0]
+        rid = task.record_id
+        self._set_status(rid, "澄清中")
+        _, project_path = self._project_for(task)
+        pred = self.clarify.predict(task.description, project_path)
+        self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+        t = self.store.get(rid)
+        t.progress = "round:1"
+        self.store._save(t)
+
+    def advance(self, record_id: str, decision: Decision):
+        """处理一次卡片点击决策，发出下一张卡后返回。
+        供 hermes auto-coder-agent skill 调用：每次卡片点击 = 一次 advance 调用。"""
+        status = self.store.get(record_id).status
+        stage = decision.stage
+        if status == "澄清中" and stage == "clarify":
+            self._advance_clarify(record_id, decision)
+        elif status in ("待立项", "澄清中") and stage == "charter":
+            self._advance_charter(record_id, decision)
+        elif status == "待审批" and stage == "plan":
+            self._advance_plan(record_id, decision)
+        else:
+            raise ValueError(f"无法 advance: status={status}, stage={stage}")
+
+    def _advance_clarify(self, rid: str, decision: Decision):
+        task = self.store.get(rid)
+        _, project_path = self._project_for(task)
+        # 读当前轮次
+        round_no = 1
+        if task.progress and task.progress.startswith("round:"):
+            try:
+                round_no = int(task.progress.split(":")[1])
+            except ValueError:
+                pass
+        trivial = not decision.form
+        if self.clarify.ready_to_charter(decision.form, round_no, trivial):
+            summary = self.clarify.synthesize(task.description, decision.form)
+            self.store.update_summary(rid, summary, "")
+            if not task.task_title:
+                t = self.store.get(rid)
+                t.task_title = t.description
+                self.store._save(t)
+            self._set_status(rid, "待立项")
+            task = self.store.get(rid)
+            self.notifier.send_charter(task, task.summary)
+        else:
+            next_round = min(round_no + 1, 3)
+            t = self.store.get(rid)
+            t.progress = f"round:{next_round}"
+            self.store._save(t)
+            pred = self.clarify.predict(task.description, project_path)
+            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=next_round)
+
+    def _advance_charter(self, rid: str, decision: Decision):
+        task = self.store.get(rid)
+        action = decision.action
+        if action == "reject_charter":
+            self._set_status(rid, "已搁置")
+            return
+        if action in ("revise_charter", "rechat"):
+            self._set_status(rid, "澄清中")
+            t = self.store.get(rid)
+            t.progress = "round:1"
+            self.store._save(t)
+            _, project_path = self._project_for(task)
+            pred = self.clarify.predict(task.description, project_path)
+            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+            return
+        # approve_charter
+        project_key, _ = self._project_for(task)
+        if not project_key:
+            self.notifier.send_failure(task, "立项", "无法匹配目标项目", "", "")
+            return
+        proj = self.cfg.projects[project_key]
+        self.wt.create(proj["path"], proj["base_branch"], rid)
+        self._set_status(rid, "规划中")
+        self._launch_bg("plan", rid)
+
+    def _advance_plan(self, rid: str, decision: Decision):
+        task = self.store.get(rid)
+        project_key, _ = self._project_for(task)
+        proj = self.cfg.projects[project_key]
+        action = decision.action
+        if action == "approve_plan":
+            active = self.wt.active_count(proj["path"], rid)
+            if self.wt.gate_open(active, self.cfg.concurrency_limit):
+                self.store.update_status(rid, "进行中")
+                self._launch_bg("execute", rid)
+            else:
+                self.store.set_queue_position(rid, active)
+        elif action == "revise_plan":
+            self._set_status(rid, "规划中")
+            self._launch_bg("plan", rid)
+        elif action == "reunderstand":
+            self.wt.remove(proj["path"], rid)
+            self._set_status(rid, "澄清中")
+            t = self.store.get(rid)
+            t.progress = "round:1"
+            self.store._save(t)
+            pred = self.clarify.predict(task.description, proj["path"])
+            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+
+    def _launch_bg(self, *args):
+        """以 auto-coder <args> 后台启动，脱离父进程组，hermes 不会带走它。"""
+        subprocess.Popen(
+            ["auto-coder", *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    # ---- feishu plan sub-command (called detached from _advance_charter) --
+    def run_plan_and_notify(self, record_id: str):
+        """规划引擎完整流程：建 spec/plan/tasks，发方案卡。
+        由 `auto-coder plan <rid>` 后台调用（不交互）。"""
+        task = self.store.get(record_id)
+        project_key, _ = self._project_for(task)
+        proj = self.cfg.projects[project_key]
+        wtpath = self._resolve_wt_by_key(project_key, record_id)
+        self._plan(task, project_key, proj, wtpath, task.summary)
 
     def _drive(self, rid):
         """按当前状态路由到对应阶段，顺序贯穿到下一个卡点或终态。"""

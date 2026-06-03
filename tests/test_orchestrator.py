@@ -261,6 +261,143 @@ def test_execute_engine_failure_sets_stalled(tmp_path):
     assert store.get("r1").status == "已停滞"
 
 
+def test_advance_clarify_ready_sends_charter(tmp_path):
+    """advance clarify_submit（满足立项条件）→ 发 charter 卡，状态变 待立项。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p",
+                   status="澄清中"))
+    notifier = FakeNotifier()
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}),
+                        predict_fn=lambda d, p: __import__(
+                            "autocoder.core.clarify", fromlist=["Prediction"]
+                        ).Prediction([], []))
+    decision = Decision("clarify_submit", "r1", "clarify",
+                        form={"scope": "范围", "acceptance": "验收"})
+    orch.advance("r1", decision)
+
+    assert "charter" in notifier.calls
+    assert store.get("r1").status == "待立项"
+    assert store.get("r1").task_title == "给 demo 加功能"  # title 兜底
+
+
+def test_advance_clarify_not_ready_sends_next_round(tmp_path):
+    """advance clarify_submit（scope/acceptance 未填写）→ 再发一轮澄清卡，状态保持 澄清中。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="澄清中", progress="round:1"))
+    notifier = FakeNotifier()
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}),
+                        predict_fn=lambda d, p: __import__(
+                            "autocoder.core.clarify", fromlist=["Prediction"]
+                        ).Prediction([], []))
+    # 有表单但关键维度为空 → ready_to_charter 返回 False
+    decision = Decision("clarify_submit", "r1", "clarify",
+                        form={"scope": "", "acceptance": ""})
+    orch.advance("r1", decision)
+
+    assert notifier.calls == ["clarify"]   # 再发一轮
+    assert store.get("r1").status == "澄清中"
+    assert store.get("r1").progress == "round:2"
+
+
+def test_advance_charter_reject(tmp_path):
+    """advance reject_charter → 状态变 已搁置。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="x", priority="p", status="待立项",
+                   project="demo", summary="s"))
+    notifier = FakeNotifier()
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}))
+    orch.advance("r1", Decision("reject_charter", "r1", "charter"))
+
+    assert store.get("r1").status == "已搁置"
+    assert notifier.calls == []
+
+
+def test_advance_charter_approve_creates_worktree_and_launches_plan(tmp_path):
+    """advance approve_charter → 创建 worktree，后台启动 plan，状态变 规划中。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="x", priority="p", status="待立项",
+                   project="demo", summary="s"))
+    notifier = FakeNotifier()
+
+    created = []
+    launched = []
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: created.append(r) or "wt"),
+        "remove": staticmethod(lambda p, r: None),
+        "active_count": staticmethod(lambda p, x=None: 0),
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}), worktree=fake_wt)
+    orch._launch_bg = lambda *a: launched.append(a)  # 拦截后台启动
+
+    orch.advance("r1", Decision("approve_charter", "r1", "charter"))
+
+    assert created == ["r1"]
+    assert store.get("r1").status == "规划中"
+    assert ("plan", "r1") in launched
+
+
+def test_advance_plan_approve_launches_execute(tmp_path):
+    """advance approve_plan（门开着）→ 状态变 进行中，后台启动 execute。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="x", priority="p", status="待审批",
+                   project="demo", summary="s", task_title="t", base_branch="main"))
+    notifier = FakeNotifier()
+
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: None),
+        "active_count": staticmethod(lambda p, x=None: 0),
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+
+    launched = []
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}), worktree=fake_wt)
+    orch._launch_bg = lambda *a: launched.append(a)
+
+    orch.advance("r1", Decision("approve_plan", "r1", "plan"))
+
+    assert store.get("r1").status == "进行中"
+    assert ("execute", "r1") in launched
+
+
+def test_dispatch_feishu_sends_clarify_and_exits(tmp_path):
+    """dispatch_feishu → 发澄清卡、写 round:1、状态变 澄清中，立即返回。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p"))
+    notifier = FakeNotifier()
+
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}),
+                        predict_fn=lambda d, p: __import__(
+                            "autocoder.core.clarify", fromlist=["Prediction"]
+                        ).Prediction([], []))
+    orch.dispatch_feishu()
+
+    assert "clarify" in notifier.calls
+    assert store.get("r1").status == "澄清中"
+    assert store.get("r1").progress == "round:1"
+
+
 def test_execute_record_lock_blocks_duplicate(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
