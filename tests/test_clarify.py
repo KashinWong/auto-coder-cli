@@ -1,4 +1,4 @@
-from autocoder.core.clarify import ClarifyOrchestrator, Prediction
+from autocoder.core.clarify import ClarifyOrchestrator, Prediction, Question
 
 
 def test_predict_uses_injected_fn():
@@ -10,34 +10,73 @@ def test_predict_uses_injected_fn():
     assert pred.risks == ["会话兼容性"]
 
 
-def test_ready_to_charter_when_form_filled():
+def test_ready_when_ai_says_ready():
     orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
-    form = {"scope": "只改前端", "acceptance": "能登录",
-            "constraints": "无", "modules": "auth", "risk_reply": "无"}
-    assert orch.ready_to_charter(form, round_no=1) is True
+    pred = Prediction([], [], ready=True, ready_reason="信息已足够")
+    assert orch.ready_to_charter(pred, round_no=1) is True
 
 
-def test_ready_to_charter_forced_at_round_3():
+def test_ready_when_ai_has_no_questions():
     orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
-    assert orch.ready_to_charter({}, round_no=3) is True
+    # AI 未显式 ready，但已问不出任何问题 → 视为够了
+    pred = Prediction([], [], ready=False, questions=[])
+    assert orch.ready_to_charter(pred, round_no=1) is True
 
 
-def test_not_ready_when_empty_form_early_round():
+def test_not_ready_when_ai_still_has_questions():
     orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
-    # 多维度留空且非末轮且需求非自描述 → 再问一轮
-    assert orch.ready_to_charter({"scope": "", "acceptance": ""}, round_no=1) is False
+    pred = Prediction([], [], ready=False,
+                      questions=[Question(key="q", ask="超时如何处理？")])
+    assert orch.ready_to_charter(pred, round_no=1) is False
 
 
-def test_empty_form_but_trivial_task_charters_round_1():
+def test_ready_forced_at_max_rounds():
     orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
-    # 无 _form 但需求自描述（短、单文件文档改动）→ 立即立项
+    # 即使 AI 还想问，硬上限（5 轮）也强制立项，防引擎抽风死循环
+    pred = Prediction([], [], questions=[Question(key="q", ask="还有问题")])
+    assert orch.ready_to_charter(pred, round_no=5) is True
+
+
+def test_ready_when_trivial():
+    orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
     assert orch.ready_to_charter(None, round_no=1, trivial=True) is True
 
 
-def test_synthesize_statement():
+def test_synthesize_from_qa():
     orch = ClarifyOrchestrator(predict_fn=lambda d, p: Prediction([], []))
-    form = {"scope": "只改前端登录页", "acceptance": "点击能跳转"}
-    stmt = orch.synthesize("加登录按钮", form)
+    qa = [
+        {"ask": "范围边界？", "answer": "只改前端登录页"},
+        {"ask": "验收标准？", "answer": "点击能跳转"},
+        {"ask": "涉及模块？", "answer": ["a.js", "b.js"]},
+    ]
+    stmt = orch.synthesize("加登录按钮", qa)
     assert "加登录按钮" in stmt
     assert "只改前端登录页" in stmt
     assert "点击能跳转" in stmt
+    assert "a.js、b.js" in stmt
+
+
+def test_progress_roundtrip():
+    qa = [{"ask": "Q1", "answer": "A1"}]
+    pending = [{"key": "q2", "ask": "Q2", "type": "text", "options": []}]
+    enc = ClarifyOrchestrator.encode_progress(2, qa, pending)
+    dec = ClarifyOrchestrator.decode_progress(enc)
+    assert dec["round"] == 2
+    assert dec["qa"] == qa
+    assert dec["pending"] == pending
+
+
+def test_progress_decode_backward_compat_round_n():
+    # 旧格式 "round:N" 仍可解码，qa/pending 退化为空
+    dec = ClarifyOrchestrator.decode_progress("round:2")
+    assert dec["round"] == 2
+    assert dec["qa"] == []
+    assert dec["pending"] == []
+
+
+def test_progress_decode_empty_and_garbage():
+    for bad in (None, "", "not json"):
+        dec = ClarifyOrchestrator.decode_progress(bad)
+        assert dec["round"] == 1
+        assert dec["qa"] == []
+        assert dec["pending"] == []

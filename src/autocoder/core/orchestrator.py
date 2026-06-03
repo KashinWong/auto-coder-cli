@@ -7,12 +7,18 @@ from autocoder.core import state_machine as sm
 from autocoder.core import worktree as wt_mod
 from autocoder.core import planner
 from autocoder.core.clarify import ClarifyOrchestrator
-from autocoder.core.engine_runner import run_engine, run_command, EngineResult
+from autocoder.core.engine_runner import (
+    run_engine, run_engine_capture, run_command, EngineResult,
+)
 from autocoder.models import Decision
 
 
 def _default_engine_run(spec, working_dir, prompt, log_file):
     return run_engine(spec, working_dir, prompt, log_file)
+
+
+def _default_engine_capture(spec, working_dir, prompt, timeout=None):
+    return run_engine_capture(spec, working_dir, prompt, timeout)
 
 
 class _DefaultGit:
@@ -39,7 +45,7 @@ class _DefaultGit:
 class Orchestrator:
     def __init__(self, config, store, notifier, router,
                  worktree=wt_mod, git_ops=None, engine_run=None,
-                 predict_fn=None, resolve_worktree=None):
+                 predict_fn=None, resolve_worktree=None, engine_capture=None):
         self.cfg = config
         self.store = store
         self.notifier = notifier
@@ -47,6 +53,7 @@ class Orchestrator:
         self.wt = worktree
         self.git = git_ops or _DefaultGit
         self.engine_run = engine_run or _default_engine_run
+        self.engine_capture = engine_capture or _default_engine_capture
         self.clarify = ClarifyOrchestrator(
             predict_fn=predict_fn or self._engine_predict)
         self._resolve_worktree = resolve_worktree
@@ -81,11 +88,133 @@ class Orchestrator:
             p.rmdir()
 
     # ---- prediction via engine (default) ------------------------------
-    def _engine_predict(self, description, project_path):
+    def _engine_predict(self, description, project_path, prior_qa=None):
+        """让编码引擎读项目代码，对需求做结构化预判。
+
+        在 project_path 下跑引擎（claude --print），要求只输出一段 JSON：
+        {modules, risks, scope_hint, acceptance_hint, ready, ready_reason, questions}。
+        预判失败/超时/解析失败一律降级为空预判——绝不阻断澄清流程。
+        prior_qa 非空时（第二轮起）把历轮问答喂回，让 AI 增量判断够没够。
+        """
         from autocoder.core.clarify import Prediction
-        # 默认实现：不深入跑引擎做结构化预判（留给飞书/agent 场景增强），
-        # CLI 默认给空预判，由用户在澄清回答里补全。
-        return Prediction([], [])
+        if not project_path:
+            return Prediction([], [])
+        spec = self._predict_engine_spec(project_path)
+        if not spec:
+            return Prediction([], [])
+        prompt = self._build_predict_prompt(description, prior_qa)
+        # 预判要快，给较短超时，避免卡澄清。引擎自带 timeout 可能是 1800s。
+        timeout = min(spec.get("timeout", 1800), 180)
+        out = self.engine_capture(spec, project_path, prompt, timeout)
+        return self._parse_prediction(out)
+
+    def _predict_engine_spec(self, project_path):
+        """按 project_path 反查它配的引擎 spec；找不到用默认引擎。"""
+        for proj in self.cfg.projects.values():
+            if proj.get("path") == project_path:
+                name = proj.get("engine", self.cfg.default_engine)
+                return self.cfg.engine_spec(name)
+        if self.cfg.default_engine:
+            return self.cfg.engine_spec(self.cfg.default_engine)
+        return None
+
+    def _build_predict_prompt(self, description, prior_qa):
+        import json as _json
+        lines = [
+            "你是需求澄清助手。请先快速浏览当前项目代码结构，再对下面的需求做预判。",
+            "",
+            f"需求：{description}",
+            "",
+        ]
+        if prior_qa:
+            lines += [
+                "用户已在前几轮澄清中回答了以下问题，请据此判断信息是否已足够立项；",
+                "已答的不要再问，只针对仍然影响实现/验收的关键缺口提问：",
+                _json.dumps(prior_qa, ensure_ascii=False),
+                "",
+            ]
+        lines += [
+            "只输出一段 JSON（不要任何额外文字、不要 markdown 代码块），字段：",
+            '{',
+            '  "modules": ["预判涉及的文件或模块名", ...],',
+            '  "risks": ["实现该需求的技术风险点", ...],',
+            '  "scope_hint": "一句话预判范围边界：做什么/明确不做什么",',
+            '  "acceptance_hint": "一句话预判验收标准：怎样算完成",',
+            '  "ready": true/false,',
+            '  "ready_reason": "一句话说明为何够了/还缺什么",',
+            '  "questions": [',
+            '    {"key": "短标识", "ask": "要问用户的问题",',
+            '     "type": "text | single_select | multi_select",',
+            '     "options": ["仅 select 类型需要的候选项", ...]}',
+            '  ]',
+            '}',
+            "要求：",
+            "- modules 必须是项目里真实存在的文件/模块。",
+            "- 只问真正阻断实现或验收的关键点，能从代码/需求推断的不要问。",
+            "- 最多提 3 个问题；信息已足够时 ready=true 且 questions 为空数组。",
+            "- 能用选项回答的尽量用 single_select/multi_select，减轻用户负担。",
+        ]
+        return "\n".join(lines)
+
+    def _parse_prediction(self, out):
+        import json as _json
+        import re
+        from autocoder.core.clarify import Prediction, Question
+        if not out or not out.strip():
+            return Prediction([], [])
+        # 引擎可能裹了 ```json ``` 或夹带前后文字，抓第一个 {...} 块。
+        text = out.strip()
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return Prediction([], [])
+        try:
+            data = _json.loads(m.group(0))
+        except (ValueError, TypeError):
+            return Prediction([], [])
+        if not isinstance(data, dict):
+            return Prediction([], [])
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return [str(x) for x in v if str(x).strip()]
+            if isinstance(v, str) and v.strip():
+                return [v.strip()]
+            return []
+
+        def _parse_questions(v):
+            qs = []
+            if not isinstance(v, list):
+                return qs
+            for i, item in enumerate(v):
+                # 兼容引擎仍按旧格式返回纯字符串问题的情况。
+                if isinstance(item, str):
+                    if item.strip():
+                        qs.append(Question(key=f"q{i}", ask=item.strip()))
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                ask = str(item.get("ask", "") or "").strip()
+                if not ask:
+                    continue
+                qtype = str(item.get("type", "text") or "text").strip()
+                if qtype not in ("text", "single_select", "multi_select"):
+                    qtype = "text"
+                opts = _as_list(item.get("options"))
+                if qtype != "text" and not opts:
+                    qtype = "text"  # select 无候选项则退化为文本
+                key = str(item.get("key", "") or f"q{i}").strip() or f"q{i}"
+                qs.append(Question(key=key, ask=ask, type=qtype, options=opts))
+            return qs[:3]  # 每张卡最多 3 个问题
+
+        return Prediction(
+            modules=_as_list(data.get("modules")),
+            risks=_as_list(data.get("risks")),
+            scope_hint=str(data.get("scope_hint", "") or "").strip(),
+            acceptance_hint=str(data.get("acceptance_hint", "") or "").strip(),
+            ready=bool(data.get("ready", False)),
+            ready_reason=str(data.get("ready_reason", "") or "").strip(),
+            questions=_parse_questions(data.get("questions")),
+        )
 
     def _set_status(self, record_id, to):
         cur = self.store.get(record_id).status
@@ -119,13 +248,33 @@ class Orchestrator:
             return
         task = pending[0]
         rid = task.record_id
-        self._set_status(rid, "澄清中")
         _, project_path = self._project_for(task)
         pred = self.clarify.predict(task.description, project_path)
-        self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+        # 先发卡：失败会抛错，此时状态仍为「待开始」，可安全重试，
+        # 避免任务被孤立在「澄清中」却没有卡片可点。
+        self.notifier.send_clarify(task, pred, round_no=1)
+        self._set_status(rid, "澄清中")
+        # 持久化本轮发出的问题，下次 advance 才能把答案配回问题文本。
+        pending_qs = [vars(q) for q in pred.questions]
         t = self.store.get(rid)
-        t.progress = "round:1"
+        t.progress = self.clarify.encode_progress(1, [], pending_qs)
         self.store._save(t)
+
+    @staticmethod
+    def _merge_answers(pending_qs: list, form: dict) -> list:
+        """把卡片 form 答案按 question.key 配回问题文本，产出 qa 条目。
+        无 pending（旧格式/trivial）时，退化为直接收编 form 的键值。"""
+        qa = []
+        if pending_qs:
+            for q in pending_qs:
+                key = q.get("key")
+                ans = (form or {}).get(key)
+                qa.append({"ask": q.get("ask", key), "answer": ans})
+        else:
+            for k, v in (form or {}).items():
+                qa.append({"ask": k, "answer": v})
+        return qa
+
 
     def advance(self, record_id: str, decision: Decision):
         """处理一次卡片点击决策，发出下一张卡后返回。
@@ -144,16 +293,17 @@ class Orchestrator:
     def _advance_clarify(self, rid: str, decision: Decision):
         task = self.store.get(rid)
         _, project_path = self._project_for(task)
-        # 读当前轮次
-        round_no = 1
-        if task.progress and task.progress.startswith("round:"):
-            try:
-                round_no = int(task.progress.split(":")[1])
-            except ValueError:
-                pass
-        trivial = not decision.form
-        if self.clarify.ready_to_charter(decision.form, round_no, trivial):
-            summary = self.clarify.synthesize(task.description, decision.form)
+        state = self.clarify.decode_progress(task.progress)
+        round_no = state["round"]
+        # 把本轮答案配回上一卡的问题，累加进历史问答。
+        new_qa = self._merge_answers(state["pending"], decision.form)
+        qa = state["qa"] + new_qa
+        # 把答案喂回引擎，让 AI 判断够没够、还该问什么。
+        trivial = not decision.form and not qa
+        pred = self.clarify.predict(task.description, project_path, prior_qa=qa) \
+            if not trivial else None
+        if self.clarify.ready_to_charter(pred, round_no, trivial):
+            summary = self.clarify.synthesize(task.description, qa)
             self.store.update_summary(rid, summary, "")
             if not task.task_title:
                 t = self.store.get(rid)
@@ -163,12 +313,12 @@ class Orchestrator:
             task = self.store.get(rid)
             self.notifier.send_charter(task, task.summary)
         else:
-            next_round = min(round_no + 1, 3)
+            next_round = round_no + 1
+            self.notifier.send_clarify(task, pred, round_no=next_round)
+            pending_qs = [vars(q) for q in pred.questions]
             t = self.store.get(rid)
-            t.progress = f"round:{next_round}"
+            t.progress = self.clarify.encode_progress(next_round, qa, pending_qs)
             self.store._save(t)
-            pred = self.clarify.predict(task.description, project_path)
-            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=next_round)
 
     def _advance_charter(self, rid: str, decision: Decision):
         task = self.store.get(rid)
@@ -178,12 +328,7 @@ class Orchestrator:
             return
         if action in ("revise_charter", "rechat"):
             self._set_status(rid, "澄清中")
-            t = self.store.get(rid)
-            t.progress = "round:1"
-            self.store._save(t)
-            _, project_path = self._project_for(task)
-            pred = self.clarify.predict(task.description, project_path)
-            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+            self._restart_clarify(rid, task)
             return
         # approve_charter
         project_key, _ = self._project_for(task)
@@ -213,11 +358,17 @@ class Orchestrator:
         elif action == "reunderstand":
             self.wt.remove(proj["path"], rid)
             self._set_status(rid, "澄清中")
-            t = self.store.get(rid)
-            t.progress = "round:1"
-            self.store._save(t)
-            pred = self.clarify.predict(task.description, proj["path"])
-            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no=1)
+            self._restart_clarify(rid, task)
+
+    def _restart_clarify(self, rid, task):
+        """回退到澄清第 1 轮：重新预判、发卡、清空累积问答。"""
+        _, project_path = self._project_for(task)
+        pred = self.clarify.predict(task.description, project_path)
+        self.notifier.send_clarify(task, pred, round_no=1)
+        pending_qs = [vars(q) for q in pred.questions]
+        t = self.store.get(rid)
+        t.progress = self.clarify.encode_progress(1, [], pending_qs)
+        self.store._save(t)
 
     def _launch_bg(self, *args):
         """以 auto-coder <args> 后台启动，脱离父进程组，hermes 不会带走它。"""
@@ -267,21 +418,24 @@ class Orchestrator:
         return key, path
 
     def _run_clarify(self, rid) -> bool:
-        """澄清循环。返回 True 表示进入待立项。"""
+        """澄清循环（CLI 同步模式）。返回 True 表示进入待立项。
+        轮次由 AI 决断（pred.ready / 无问题），仅以 clarify 的硬上限兜底。"""
         task = self.store.get(rid)
         _, project_path = self._project_for(task)
         round_no = 1
+        qa = []
         while True:
-            pred = self.clarify.predict(task.description, project_path)
-            self.notifier.send_clarify(task, pred.modules, pred.risks, round_no)
-            decision = self.router.await_decision(rid, "clarify")
-            trivial = not decision.form
-            if self.clarify.ready_to_charter(decision.form, round_no, trivial):
+            pred = self.clarify.predict(task.description, project_path,
+                                        prior_qa=qa or None)
+            if self.clarify.ready_to_charter(pred, round_no, trivial=False):
                 break
-            if round_no >= 3:
-                break
+            self.notifier.send_clarify(task, pred, round_no)
+            decision = self.router.await_decision(rid, "clarify",
+                                                  questions=pred.questions)
+            qa += self._merge_answers([vars(q) for q in pred.questions],
+                                      decision.form)
             round_no += 1
-        summary = self.clarify.synthesize(task.description, decision.form)
+        summary = self.clarify.synthesize(task.description, qa)
         # 持久化摘要，使后续阶段（含 resume）无需重跑澄清即可取回上下文。
         self.store.update_summary(rid, summary, task.progress or "")
         # title 缺失时用 description 兜底，避免 commit message 出现 "feat: None"。

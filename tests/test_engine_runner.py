@@ -1,5 +1,6 @@
 import pytest
-from autocoder.core.engine_runner import run_engine, EngineResult
+from autocoder.core.engine_runner import (run_engine, run_engine_capture,
+                                          EngineResult)
 
 
 def test_run_engine_success(tmp_path):
@@ -33,3 +34,22 @@ def test_run_engine_failure(tmp_path):
     spec = {"command": "false", "args": [], "timeout": 5, "env": {}}
     result = run_engine(spec, str(tmp_path), "prompt", str(log))
     assert result == EngineResult.FAILURE
+
+
+def test_run_engine_capture_returns_stdout(tmp_path):
+    # echo 把 prompt 打到 stdout，capture 应原样返回。
+    spec = {"command": "echo", "args": [], "timeout": 10, "env": {}}
+    out = run_engine_capture(spec, str(tmp_path), "hello json", timeout=10)
+    assert "hello json" in out
+
+
+def test_run_engine_capture_timeout_returns_empty(tmp_path):
+    spec = {"command": "sh", "args": ["-c", "sleep 30"], "timeout": 30, "env": {}}
+    out = run_engine_capture(spec, str(tmp_path), "prompt", timeout=1)
+    assert out == ""
+
+
+def test_run_engine_capture_failure_returns_empty(tmp_path):
+    spec = {"command": "false", "args": [], "timeout": 5, "env": {}}
+    out = run_engine_capture(spec, str(tmp_path), "prompt", timeout=5)
+    assert out == ""

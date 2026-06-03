@@ -1,4 +1,5 @@
 from autocoder.adapters.notifier import CliNotifier
+from autocoder.core.clarify import Prediction, Question
 from autocoder.models import Task
 
 
@@ -8,13 +9,16 @@ def _task():
 
 
 def test_send_clarify_prints_dimensions(capsys):
-    CliNotifier().send_clarify(_task(), modules=["auth.py"],
-                               risks=["可能影响会话"], round_no=1)
+    pred = Prediction(modules=["auth.py"], risks=["可能影响会话"],
+                      scope_hint="只加登录按钮", acceptance_hint="点击可登录",
+                      questions=[Question(key="auth", ask="用哪种鉴权？")])
+    CliNotifier().send_clarify(_task(), pred, round_no=1)
     out = capsys.readouterr().out
     assert "加登录" in out
     assert "auth.py" in out
     assert "可能影响会话" in out
-    assert "1/3" in out
+    assert "只加登录按钮" in out
+    assert "用哪种鉴权？" in out
 
 
 def test_send_plan_prints_branch_and_count(capsys):

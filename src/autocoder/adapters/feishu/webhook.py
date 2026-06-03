@@ -23,7 +23,8 @@ class FeishuWebhookRouter(EventRouter):
     def deliver(self, record_id: str, decision: Decision):
         self._q(record_id).put(decision)
 
-    def await_decision(self, record_id: str, stage: str) -> Decision:
+    def await_decision(self, record_id: str, stage: str,
+                       questions: list = None) -> Decision:
         return self._q(record_id).get()
 
     def serve(self, host="0.0.0.0", port=8000):  # pragma: no cover

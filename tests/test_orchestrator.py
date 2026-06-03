@@ -7,6 +7,22 @@ from autocoder.adapters.store import JsonTaskStore
 from autocoder.models import Task, Decision
 
 
+def _one_round_predict(modules=None, risks=None):
+    """生成一个有状态 predict_fn：第 1 次给一个问题（触发一轮澄清卡），
+    之后无问题（AI 判定够了 → 进入立项）。模拟 AI 决断轮次。"""
+    from autocoder.core.clarify import Prediction, Question
+    state = {"calls": 0}
+
+    def predict(description, project_path):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return Prediction(modules or [], risks or [],
+                              questions=[Question(key="scope", ask="范围？")])
+        return Prediction(modules or [], risks or [])
+
+    return predict
+
+
 class FakeNotifier:
     def __init__(self):
         self.calls = []
@@ -27,7 +43,7 @@ class ScriptedRouter:
     def __init__(self, decisions: dict):
         self._d = decisions
 
-    def await_decision(self, record_id, stage):
+    def await_decision(self, record_id, stage, questions=None):
         return self._d[stage]
 
 
@@ -72,9 +88,7 @@ def test_dispatch_happy_path_to_planning(tmp_path):
 
     orch = Orchestrator(cfg, store, notifier, router,
                         worktree=fake_wt,
-                        predict_fn=lambda d, p: __import__(
-                            "autocoder.core.clarify", fromlist=["Prediction"]
-                        ).Prediction(["m.py"], ["风险"]))
+                        predict_fn=_one_round_predict(["m.py"], ["风险"]))
     orch.dispatch_one()
 
     assert "clarify" in notifier.calls
@@ -89,7 +103,7 @@ class MutableRouter:
     def __init__(self, scripts: dict):
         self._scripts = {k: list(v) for k, v in scripts.items()}
 
-    def await_decision(self, record_id, stage):
+    def await_decision(self, record_id, stage, questions=None):
         return self._scripts[stage].pop(0)
 
 
@@ -284,26 +298,31 @@ def test_advance_clarify_ready_sends_charter(tmp_path):
 
 
 def test_advance_clarify_not_ready_sends_next_round(tmp_path):
-    """advance clarify_submit（scope/acceptance 未填写）→ 再发一轮澄清卡，状态保持 澄清中。"""
+    """advance clarify_submit 后 AI 仍有问题 → 再发一轮澄清卡，状态保持 澄清中。"""
     proj = tmp_path / "proj"
     proj.mkdir()
     cfg = _config(tmp_path, proj)
     store = JsonTaskStore(cfg.workspace_dir)
-    store.add(Task(record_id="r1", description="x", priority="p",
-                   status="澄清中", progress="round:1"))
+    from autocoder.core.clarify import Prediction, Question, ClarifyOrchestrator
+    store.add(Task(record_id="r1", description="x", priority="p", status="澄清中",
+                   progress=ClarifyOrchestrator.encode_progress(
+                       1, [], [{"key": "scope", "ask": "范围？",
+                                "type": "text", "options": []}])))
     notifier = FakeNotifier()
     orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}),
-                        predict_fn=lambda d, p: __import__(
-                            "autocoder.core.clarify", fromlist=["Prediction"]
-                        ).Prediction([], []))
-    # 有表单但关键维度为空 → ready_to_charter 返回 False
+                        predict_fn=lambda d, p: Prediction(
+                            [], [], questions=[Question(key="timeout",
+                                                        ask="超时如何处理？")]))
+    # AI 本轮仍给出问题 → ready_to_charter 返回 False
     decision = Decision("clarify_submit", "r1", "clarify",
-                        form={"scope": "", "acceptance": ""})
+                        form={"scope": "只改前端"})
     orch.advance("r1", decision)
 
     assert notifier.calls == ["clarify"]   # 再发一轮
     assert store.get("r1").status == "澄清中"
-    assert store.get("r1").progress == "round:2"
+    dec = ClarifyOrchestrator.decode_progress(store.get("r1").progress)
+    assert dec["round"] == 2
+    assert dec["qa"] == [{"ask": "范围？", "answer": "只改前端"}]
 
 
 def test_advance_charter_reject(tmp_path):
@@ -395,7 +414,35 @@ def test_dispatch_feishu_sends_clarify_and_exits(tmp_path):
 
     assert "clarify" in notifier.calls
     assert store.get("r1").status == "澄清中"
-    assert store.get("r1").progress == "round:1"
+    from autocoder.core.clarify import ClarifyOrchestrator
+    assert ClarifyOrchestrator.decode_progress(
+        store.get("r1").progress)["round"] == 1
+
+
+def test_dispatch_feishu_send_failure_keeps_pending(tmp_path):
+    """发卡失败时状态须留在「待开始」，不能被孤立在「澄清中」。
+    回归：先翻状态再发卡会导致发卡失败后任务既无卡又无法重新 dispatch。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p"))
+
+    class FailingNotifier(FakeNotifier):
+        def send_clarify(self, *a, **k):
+            raise RuntimeError("飞书发卡失败 code=230002")
+
+    orch = Orchestrator(cfg, store, FailingNotifier(), ScriptedRouter({}),
+                        predict_fn=lambda d, p: __import__(
+                            "autocoder.core.clarify", fromlist=["Prediction"]
+                        ).Prediction([], []))
+    import pytest
+    with pytest.raises(RuntimeError):
+        orch.dispatch_feishu()
+
+    # 关键断言：发卡失败后任务仍可被重新 dispatch
+    assert store.get("r1").status == "待开始"
+    assert store.get("r1").progress in ("", None)
 
 
 def test_execute_record_lock_blocks_duplicate(tmp_path):

@@ -5,7 +5,7 @@ from autocoder.models import Task
 
 class Notifier(ABC):
     @abstractmethod
-    def send_clarify(self, task: Task, modules: list, risks: list, round_no: int) -> None: ...
+    def send_clarify(self, task: Task, pred, round_no: int) -> None: ...
     @abstractmethod
     def send_charter(self, task: Task, summary: str) -> None: ...
     @abstractmethod
@@ -25,16 +25,27 @@ def _title(task: Task) -> str:
 class CliNotifier(Notifier):
     """把每张「卡片」渲染成终端富文本。"""
 
-    def send_clarify(self, task, modules, risks, round_no):
-        print(f"\n===== 📋 需求澄清 · {_title(task)} (第 {round_no}/3 轮) =====")
+    def send_clarify(self, task, pred, round_no):
+        print(f"\n===== 📋 需求澄清 · {_title(task)} (第 {round_no} 轮) =====")
         print(f"需求描述: {task.description}")
-        print("🧩 涉及模块（预判）:")
-        for m in modules:
-            print(f"  - {m}")
-        print("⚠️ 风险点:")
-        for r in risks:
-            print(f"  - {r}")
-        print("请就以下维度补充: 范围边界 / 模块 / 验收标准 / 优先级约束 / 风险回应")
+        if pred.scope_hint:
+            print(f"🎯 范围预判: {pred.scope_hint}")
+        if pred.modules:
+            print("🧩 涉及模块（预判）:")
+            for m in pred.modules:
+                print(f"  - {m}")
+        if pred.acceptance_hint:
+            print(f"✅ 验收预判: {pred.acceptance_hint}")
+        if pred.risks:
+            print("⚠️ 风险点:")
+            for r in pred.risks:
+                print(f"  - {r}")
+        if pred.ready_reason:
+            print(f"🤖 AI 判断: {pred.ready_reason}")
+        print("❓ 本轮需澄清:")
+        for q in pred.questions:
+            opt = f"（候选：{' / '.join(q.options)}）" if q.options else ""
+            print(f"  - {q.ask}{opt}")
 
     def send_charter(self, task, summary):
         print(f"\n===== 🏗️ 立项确认 · {_title(task)} =====")

@@ -1,112 +1,22 @@
 {
+  "schema": "2.0",
   "config": {
-    "wide_screen_mode": true,
     "update_multi": true
   },
   "header": {
     "template": "orange",
     "title": {
       "tag": "plain_text",
-      "content": "📋 需求澄清 · {{TASK_TITLE}} (第 {{ROUND}}/3 轮)"
+      "content": "📋 需求澄清 · {{TASK_TITLE}} (第 {{ROUND}} 轮)"
     }
   },
-  "elements": [
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**🎯 范围边界**\n做什么 / 明确不做什么"
+  "body": {
+    "elements": [
+      {
+        "tag": "form",
+        "name": "clarify_form",
+        "elements": {{FORM_ELEMENTS}}
       }
-    },
-    {
-      "tag": "input",
-      "name": "scope",
-      "placeholder": {
-        "tag": "plain_text",
-        "content": "范围补充…"
-      }
-    },
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**🧩 涉及模块**（预判）\n{{MODULE_BLOCK}}"
-      }
-    },
-    {
-      "tag": "input",
-      "name": "modules",
-      "placeholder": {
-        "tag": "plain_text",
-        "content": "模块补充/纠正…"
-      }
-    },
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**✅ 验收标准**\n怎样算完成、关键场景"
-      }
-    },
-    {
-      "tag": "input",
-      "name": "acceptance",
-      "placeholder": {
-        "tag": "plain_text",
-        "content": "你期望怎样算完成…"
-      }
-    },
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**⚙️ 优先级/约束**\ndeadline / 性能 / 兼容性硬约束"
-      }
-    },
-    {
-      "tag": "input",
-      "name": "constraints",
-      "placeholder": {
-        "tag": "plain_text",
-        "content": "约束补充…"
-      }
-    },
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**⚠️ 风险点**\n{{RISK_BLOCK}}"
-      }
-    },
-    {
-      "tag": "input",
-      "name": "risk_reply",
-      "placeholder": {
-        "tag": "plain_text",
-        "content": "对风险点的回应…"
-      }
-    },
-    {
-      "tag": "hr"
-    },
-    {
-      "tag": "action",
-      "actions": [
-        {
-          "tag": "button",
-          "text": {
-            "tag": "plain_text",
-            "content": "提交澄清"
-          },
-          "type": "primary",
-          "value": {
-            "ac_action": "clarify_submit",
-            "record_id": "{{RECORD_ID}}",
-            "stage": "clarify",
-            "_skill": "auto-coder-agent"
-          }
-        }
-      ]
-    }
-  ]
+    ]
+  }
 }

@@ -1,13 +1,16 @@
 import builtins
 from autocoder.adapters.router import CliRouter
+from autocoder.core.clarify import Question
 from autocoder.models import Decision
 
 
 def test_clarify_decision_collects_form(monkeypatch):
-    # 模拟用户依次输入 5 个澄清维度的回答
-    answers = iter(["只改前端", "auth.py", "能登录即可", "无 deadline", "无风险"])
+    # 模拟用户依次回答 AI 本轮给出的两个问题
+    answers = iter(["只改前端", "auth.py"])
     monkeypatch.setattr(builtins, "input", lambda *a: next(answers))
-    d = CliRouter().await_decision("r1", stage="clarify")
+    questions = [Question(key="scope", ask="范围？"),
+                 Question(key="modules", ask="涉及模块？")]
+    d = CliRouter().await_decision("r1", stage="clarify", questions=questions)
     assert isinstance(d, Decision)
     assert d.action == "clarify_submit"
     assert d.form["scope"] == "只改前端"
