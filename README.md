@@ -1,4 +1,4 @@
-# auto-coder-oss
+# auto-coder-cli
 
 Agent 驱动的自动化编码工作流：把"一句话需求"推进到"一个可审查的代码分支"。
 

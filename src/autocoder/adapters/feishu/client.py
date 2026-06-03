@@ -22,7 +22,7 @@ class FeishuClient:
     SAME-APP 规则：交互卡片按钮回调只会回到「发卡的那个 app」。若用别的
     app 发卡，所有按钮点击都会失联。务必用接收事件的同一 app 凭证。
 
-    requests 是可选依赖（pip install auto-coder-oss[feishu]），延迟导入，
+    requests 是可选依赖（pip install auto-coder-cli[feishu]），延迟导入，
     使纯函数 render_card 在未安装时仍可用。
     """
 
