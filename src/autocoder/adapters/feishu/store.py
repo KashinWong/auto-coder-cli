@@ -1,5 +1,6 @@
 import json
 import subprocess
+from dataclasses import fields as _dc_fields
 from datetime import datetime
 
 from autocoder.adapters.store import TaskStore
@@ -20,6 +21,13 @@ _FIELD_MAP = {
 }
 # Task 属性 → bitable 字段名（反向映射，用于写回）
 _ATTR_TO_FIELD = {v: k for k, v in _FIELD_MAP.items()}
+
+# 未单独建列的 Task 属性统一打包进这一个 JSON 文本列兜底。
+# 含规划阶段写回、执行阶段读取的元数据（project/engine/spec_dir/base_branch
+# /task_title 等）——这些字段无独立列，若不兜底会在进程间丢失。
+_META_FIELD = "元数据"
+_MAPPED_ATTRS = set(_FIELD_MAP.values()) | {"record_id"}
+_META_ATTRS = [f.name for f in _dc_fields(Task) if f.name not in _MAPPED_ATTRS]
 
 
 class FeishuBaseStore(TaskStore):
@@ -60,6 +68,18 @@ class FeishuBaseStore(TaskStore):
             elif isinstance(raw, str):
                 kwargs[attr] = raw
             # user/datetime/其他类型暂不映射
+        # 兜底列：未单独建列的元数据从「元数据」JSON 还原。
+        meta_raw = fields_dict.get(_META_FIELD)
+        if isinstance(meta_raw, list) and meta_raw:
+            meta_raw = meta_raw[0]
+        if isinstance(meta_raw, str) and meta_raw.strip():
+            try:
+                meta = json.loads(meta_raw)
+            except (ValueError, TypeError):
+                meta = {}
+            for attr in _META_ATTRS:
+                if meta.get(attr) is not None:
+                    kwargs[attr] = meta[attr]
         return Task(**kwargs)
 
     def add(self, task: Task) -> str:
@@ -85,7 +105,8 @@ class FeishuBaseStore(TaskStore):
         return ids[0]
 
     def _save(self, task: Task) -> None:
-        """把 Task 的所有非空字段写回 bitable。"""
+        """把 Task 的所有非空字段写回 bitable。
+        有独立列的走各自列；其余元数据打包进「元数据」JSON 列兜底。"""
         payload = {}
         for attr, field_name in _ATTR_TO_FIELD.items():
             val = getattr(task, attr, None)
@@ -94,6 +115,10 @@ class FeishuBaseStore(TaskStore):
                     payload[field_name] = [val]
                 else:
                     payload[field_name] = val
+        meta = {attr: getattr(task, attr, None) for attr in _META_ATTRS
+                if getattr(task, attr, None) is not None}
+        if meta:
+            payload[_META_FIELD] = json.dumps(meta, ensure_ascii=False)
         if payload:
             self._upsert(task.record_id, payload)
 
