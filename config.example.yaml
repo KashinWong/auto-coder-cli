@@ -1,7 +1,7 @@
 adapters:
   store: json          # json | feishu
   notifier: cli        # cli | feishu
-  router: cli          # cli | feishu_webhook
+  router: cli          # cli | feishu_webhook（飞书模式入站由外部网关转发，通常仍填 cli）
 
 workspace_dir: ./workspace/tasks
 
@@ -36,18 +36,11 @@ engines:
     env: {}
   default: claude-code
 
-clarify_dimensions:
-  - {key: scope,       label: "🎯 范围边界",    source: fixed}
-  - {key: modules,     label: "🧩 涉及模块",    source: agent}
-  - {key: acceptance,  label: "✅ 验收标准",    source: fixed}
-  - {key: constraints, label: "⚙️ 优先级/约束", source: fixed}
-  - {key: risk,        label: "⚠️ 风险点",      source: agent}
+# 澄清由引擎自适应驱动（AI 自行决断问什么、问几轮），无需在此配固定维度。
 
-# 仅当 adapters.store/notifier = feishu 时需要
+# 仅当 adapters.store/notifier = feishu 时需要。
+# 字段名需与 src/autocoder/adapters/feishu/store.py 的 _FIELD_MAP 对齐。
 feishu:
   base_token: YOUR_BASE_TOKEN
   table_id: YOUR_TABLE_ID
-  notify_chat_id: YOUR_CHAT_ID
-  field_ids:
-    description: fldXXXXXXXX
-    priority: fldXXXXXXXX
+  notify_chat_id: YOUR_CHAT_ID   # 发卡目标群，oc_ 开头
