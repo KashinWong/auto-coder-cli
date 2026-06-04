@@ -19,9 +19,12 @@ class Config:
         return self.engines[name]
 
     def match_project(self, text: str) -> Optional[str]:
+        # 大小写不敏感：用户自然会写 Digital-Admin / Gomoku，而关键词常配小写，
+        # 区分大小写会让英文项目名静默匹配失败 → project_path 空 → 澄清卡空白。
+        low = text.lower()
         for key, proj in self.projects.items():
             for kw in proj.get("match_keywords", []):
-                if kw in text:
+                if kw.lower() in low:
                     return key
         return None
 

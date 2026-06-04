@@ -57,6 +57,14 @@ def test_match_project_by_keyword(tmp_path):
     assert cfg.match_project("无关需求") is None
 
 
+def test_match_project_is_case_insensitive(tmp_path):
+    # 关键词配小写 demo，用户写 Demo/DEMO 也必须匹配——否则英文项目名
+    # （如 Digital-Admin）会静默失配，导致 project_path 空、澄清卡空白。
+    cfg = load_config(_write(tmp_path, SAMPLE))
+    assert cfg.match_project("给 Demo 加功能") == "demo"
+    assert cfg.match_project("「DEMO」月度报表") == "demo"
+
+
 def test_missing_required_key_raises(tmp_path):
     bad = SAMPLE.replace("workspace_dir: ./workspace/tasks", "")
     with pytest.raises(ValueError, match="workspace_dir"):
