@@ -275,6 +275,39 @@ def test_execute_engine_failure_sets_stalled(tmp_path):
     assert store.get("r1").status == "已停滞"
 
 
+def test_advance_async_launches_worker_without_touching_state(tmp_path):
+    """advance_async 只 fire-and-forget 启动后台 worker，不同步推进状态。
+
+    这是绕开 hermes 120s 同步窗口的关键：predict/synthesize 可能跑满 180s，
+    必须在脱离的后台进程里跑，hermes 入口本身要秒回。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p",
+                   status="澄清中"))
+    notifier = FakeNotifier()
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}))
+
+    launched = []
+    orch._launch_bg = lambda *a: launched.append(a)
+    decision = Decision("clarify_submit", "r1", "clarify",
+                        form={"scope": "范围"})
+    orch.advance_async("r1", decision)
+
+    # 启动了 advance-worker，参数透传正确
+    assert len(launched) == 1
+    args = launched[0]
+    assert args[0] == "advance-worker"
+    assert args[1] == "r1"
+    assert args[2] == "clarify_submit"
+    assert "--stage" in args and "clarify" in args
+    assert '"scope"' in args[args.index("--form") + 1]
+    # 没有同步发卡、没有改状态——全部留给后台 worker
+    assert notifier.calls == []
+    assert store.get("r1").status == "澄清中"
+
+
 def test_advance_clarify_ready_sends_charter(tmp_path):
     """advance clarify_submit（满足立项条件）→ 发 charter 卡，状态变 待立项。"""
     proj = tmp_path / "proj"

@@ -277,9 +277,24 @@ class Orchestrator:
         return qa
 
 
+    def advance_async(self, record_id: str, decision: Decision):
+        """hermes 入口：把决策派给后台 worker 后立即返回。
+
+        hermes 的同步 terminal 窗口只有 120s，而 advance 内部的 predict/
+        synthesize 可能跑满 180s——若同步执行，进程会在发卡前被砍，任务卡死。
+        故此处只做 fire-and-forget 启动（与 plan/execute 同构），真正的状态推进
+        和发卡在脱离父进程组的后台 worker 里完成，不受 120s 限制。"""
+        import json as _json
+        self._launch_bg(
+            "advance-worker", record_id, decision.action,
+            "--stage", decision.stage or "",
+            "--form", _json.dumps(decision.form or {}, ensure_ascii=False),
+            "--input", decision.input_text or "",
+        )
+
     def advance(self, record_id: str, decision: Decision):
         """处理一次卡片点击决策，发出下一张卡后返回。
-        供 hermes auto-coder-agent skill 调用：每次卡片点击 = 一次 advance 调用。"""
+        在后台 worker 进程里同步执行（由 advance_async 启动），不受 hermes 120s 限制。"""
         status = self.store.get(record_id).status
         stage = decision.stage
         if status == "澄清中" and stage == "clarify":

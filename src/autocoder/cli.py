@@ -43,6 +43,15 @@ def main(argv=None) -> int:
     p_advance.add_argument("--input", dest="input_text", default="",
                            help="单行文本输入（改方案说明等）")
 
+    # 内部子命令：advance 的后台 worker，真正执行状态推进与发卡（不受 hermes
+    # 120s 同步窗口限制）。由 advance 经 _launch_bg detach 启动，勿手动调用。
+    p_aw = sub.add_parser("advance-worker", parents=[common])
+    p_aw.add_argument("record_id")
+    p_aw.add_argument("action")
+    p_aw.add_argument("--stage", default="")
+    p_aw.add_argument("--form", default="{}")
+    p_aw.add_argument("--input", dest="input_text", default="")
+
     sub.add_parser("status", parents=[common], help="列出所有需求状态")
 
     try:
@@ -86,7 +95,7 @@ def main(argv=None) -> int:
         Orchestrator(cfg, store, notifier, router).run_plan_and_notify(args.record_id)
         return 0
 
-    if args.cmd == "advance":
+    if args.cmd in ("advance", "advance-worker"):
         try:
             form = json.loads(args.form) if args.form and args.form.strip() != "{}" else {}
         except json.JSONDecodeError as e:
@@ -99,7 +108,13 @@ def main(argv=None) -> int:
             form=form,
             input_text=args.input_text,
         )
-        Orchestrator(cfg, store, notifier, router).advance(args.record_id, decision)
+        orch = Orchestrator(cfg, store, notifier, router)
+        # advance：hermes 入口，fire-and-forget 启动后台 worker 后立即返回，
+        # 避开 120s 同步窗口。advance-worker：后台进程，同步执行真正的推进。
+        if args.cmd == "advance":
+            orch.advance_async(args.record_id, decision)
+        else:
+            orch.advance(args.record_id, decision)
         return 0
 
     if args.cmd == "status":
