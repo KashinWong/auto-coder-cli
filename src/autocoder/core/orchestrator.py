@@ -14,6 +14,18 @@ from autocoder.core.engine_runner import (
 from autocoder.models import Decision
 
 
+# monitor 判定阈值（分钟）：每阶段允许的最长运行时间。
+# execute 引擎自带 1800s(30min) 超时，留足余量取 60min；plan 预期更快取 20min。
+_ZOMBIE_THRESHOLDS = {"进行中": ("execute", 60), "规划中": ("plan", 20)}
+
+
+def is_zombie(stale: bool, alive: bool) -> bool:
+    """僵尸判定核心：超过阈值(stale) 且 进程已死(not alive)。
+    两个条件必须同时满足——只超时但进程还在 = 慢任务，不算僵尸。"""
+    return stale and not alive
+
+
+
 def _default_engine_run(spec, working_dir, prompt, log_file):
     return run_engine(spec, working_dir, prompt, log_file)
 
@@ -244,6 +256,9 @@ class Orchestrator:
     def dispatch_feishu(self):
         """飞书模式：取一条「待开始」需求，发澄清卡后立即返回（不阻塞）。
         由 hermes cron/消息触发；后续每步靠卡片按钮 → advance() 推进。"""
+        # 兜底促活：worker 在促活前崩溃会留下僵死队列，每次触发先扫一遍。
+        for project_key in self.cfg.projects:
+            self._wake_next_queued(project_key)
         pending = self.store.fetch_pending()
         if not pending:
             return
@@ -264,16 +279,36 @@ class Orchestrator:
     @staticmethod
     def _merge_answers(pending_qs: list, form: dict) -> list:
         """把卡片 form 答案按 question.key 配回问题文本，产出 qa 条目。
-        无 pending（旧格式/trivial）时，退化为直接收编 form 的键值。"""
+        无 pending（旧格式/trivial）时，退化为直接收编 form 的键值。
+
+        两个增强字段：
+        - `{key}__other`：选项题的自由补充。与选中值合并进同一答案；
+          多选(list)→追加为一项，单选(str)→「值（补充：xxx）」，
+          无选中值→补充即答案。
+        - `__supplement`：整卡级补充说明，作为独立 qa 条目，不挂任何问题。"""
+        form = form or {}
         qa = []
         if pending_qs:
             for q in pending_qs:
                 key = q.get("key")
-                ans = (form or {}).get(key)
+                ans = form.get(key)
+                other = (form.get(f"{key}__other") or "").strip()
+                if other:
+                    if isinstance(ans, list):
+                        ans = ans + [other]
+                    elif ans:
+                        ans = f"{ans}（补充：{other}）"
+                    else:
+                        ans = other
                 qa.append({"ask": q.get("ask", key), "answer": ans})
         else:
-            for k, v in (form or {}).items():
+            for k, v in form.items():
+                if k == "__supplement" or k.endswith("__other"):
+                    continue
                 qa.append({"ask": k, "answer": v})
+        supplement = (form.get("__supplement") or "").strip()
+        if supplement:
+            qa.append({"ask": "其他补充说明", "answer": supplement})
         return qa
 
 
@@ -297,7 +332,12 @@ class Orchestrator:
         在后台 worker 进程里同步执行（由 advance_async 启动），不受 hermes 120s 限制。"""
         status = self.store.get(record_id).status
         stage = decision.stage
-        if status == "澄清中" and stage == "clarify":
+        action = decision.action
+        # 重试/重澄清来自僵尸告警卡或失败卡，是运维恢复操作：按 action 路由，
+        # 不受当前状态机出边约束（已停滞无出边，需特判放行）。
+        if action in ("retry_execute", "retry_plan", "reclarify"):
+            self._advance_retry(record_id, decision)
+        elif status == "澄清中" and stage == "clarify":
             self._advance_clarify(record_id, decision)
         elif status in ("待立项", "澄清中") and stage == "charter":
             self._advance_charter(record_id, decision)
@@ -305,6 +345,22 @@ class Orchestrator:
             self._advance_plan(record_id, decision)
         else:
             raise ValueError(f"无法 advance: status={status}, stage={stage}")
+
+    def _advance_retry(self, rid: str, decision: Decision):
+        """僵尸/失败恢复：直接置回工作态并重启对应 worker。
+        直写状态跳过状态机校验——重试是人工运维动作，源状态可能是已停滞/进行中
+        /规划中/澄清中等多种，统一放行。"""
+        task = self.store.get(rid)
+        action = decision.action
+        if action == "retry_execute":
+            self.store.update_status(rid, "进行中")
+            self._launch_bg("execute", rid)
+        elif action == "retry_plan":
+            self.store.update_status(rid, "规划中")
+            self._launch_bg("plan", rid)
+        elif action == "reclarify":
+            self.store.update_status(rid, "澄清中")
+            self._restart_clarify(rid, task)
 
     def _advance_clarify(self, rid: str, decision: Decision):
         task = self.store.get(rid)
@@ -367,7 +423,7 @@ class Orchestrator:
                 self.store.update_status(rid, "进行中")
                 self._launch_bg("execute", rid)
             else:
-                self.store.set_queue_position(rid, active)
+                self._enqueue(rid, task, active)
         elif action == "revise_plan":
             self._set_status(rid, "规划中")
             self._launch_bg("plan", rid)
@@ -385,6 +441,74 @@ class Orchestrator:
         t = self.store.get(rid)
         t.progress = self.clarify.encode_progress(1, [], pending_qs)
         self.store._save(t)
+
+    def _enqueue(self, rid, task, active):
+        """并发槽已满：记排队位置 + 批准时间（FIFO 键），发「已排队」卡。
+        状态停在「待审批」，由 queue_position 是否为 None 区分
+        「待用户批准」与「已批准待槽位」两种语义。"""
+        t = self.store.get(rid)
+        t.queue_position = active
+        t.approved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.store._save(t)
+        self.notifier.send_queued(task, active)
+
+    def _wake_next_queued(self, project_key):
+        """并发槽释放后，按 approved_at FIFO 促活该项目下排队最久的一个。
+        一次只起一个；其 execute 完成后会再次调用本方法，链式排空队列。
+        并发安全由 execute 的重入锁兜底。"""
+        proj = self.cfg.projects.get(project_key)
+        if not proj:
+            return
+        queued = [
+            t for t in self.store.fetch_by_status("待审批")
+            if t.queue_position is not None
+            and (t.project or self.cfg.match_project(t.description)) == project_key
+        ]
+        queued.sort(key=lambda t: t.approved_at or "")
+        for t in queued:
+            active = self.wt.active_count(proj["path"], t.record_id)
+            if not self.wt.gate_open(active, self.cfg.concurrency_limit):
+                break
+            self.store.update_status(t.record_id, "进行中")
+            tt = self.store.get(t.record_id)
+            tt.queue_position = None
+            self.store._save(tt)
+            self._launch_bg("execute", t.record_id)
+            break
+
+    # ---- monitor: 僵尸任务巡检 ----------------------------------------
+    def _started_at(self, task, kind):
+        """取该阶段的开始时间戳，解析为 datetime；缺失或不可解析返回 None。"""
+        raw = getattr(task, f"{kind}_started_at", None)
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+        except (ValueError, TypeError):
+            return None
+
+    def monitor(self):
+        """扫描非终态任务，按时间戳+进程双信号判定僵尸，命中发告警卡。
+        由独立 monitor cron 周期触发。不自动恢复——只告警，恢复靠人工点卡片按钮。
+
+        覆盖：
+        - 进行中/规划中：超阈值 且 worker 进程已死 → 僵尸告警
+        - 澄清中且 progress 为空：发卡前崩溃，无卡可点 → 告警
+        待开始/待审批(排队) 由 dispatch 兜底，终态(已完成/已搁置/已停滞)跳过。"""
+        from autocoder.core import process_probe as probe
+        now = datetime.now()
+        for status, (kind, minutes) in _ZOMBIE_THRESHOLDS.items():
+            for t in self.store.fetch_by_status(status):
+                started = self._started_at(t, kind)
+                # 无时间戳=老任务或写入前崩溃 → 视为已超时（可疑）。
+                stale = started is None or (now - started).total_seconds() > minutes * 60
+                alive = probe.worker_alive(t.record_id, kind)
+                if is_zombie(stale, alive):
+                    self.notifier.send_zombie_alert(t, status, kind, minutes)
+        # 澄清中但无 progress：发澄清卡前就崩了，用户没有卡可点，会永久卡住。
+        for t in self.store.fetch_by_status("澄清中"):
+            if not (t.progress or "").strip():
+                self.notifier.send_zombie_alert(t, "澄清中", "clarify", 0)
 
     def _launch_bg(self, *args):
         """以 `python -m autocoder.cli <args>` 后台启动，脱离父进程组，
@@ -506,7 +630,7 @@ class Orchestrator:
                     self.store.update_status(rid, "进行中")
                 self.execute(rid)
             else:
-                self.store.set_queue_position(rid, active)
+                self._enqueue(rid, task, active)
         elif plan_decision.action == "revise_plan":
             self._set_status(rid, "规划中")
         elif plan_decision.action == "reunderstand":
@@ -519,6 +643,10 @@ class Orchestrator:
 
 
     def _plan(self, task, project_key, proj, worktree_path, requirement):
+        # 阶段开始时间：供 monitor 判定规划是否卡死（双信号之一）。
+        ts = self.store.get(task.record_id)
+        ts.plan_started_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.store._save(ts)
         spec_dir = planner.next_spec_dir(worktree_path, task.task_title or "")
         Path(worktree_path, spec_dir).mkdir(parents=True, exist_ok=True)
         engine_name = proj.get("engine", self.cfg.default_engine)
@@ -560,6 +688,9 @@ class Orchestrator:
 
     def _execute_inner(self, record_id):
         task = self.store.get(record_id)
+        # 阶段开始时间：供 monitor 判定执行是否卡死（双信号之一）。
+        task.execute_started_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.store._save(task)
         start = time.time()
         wtpath = self._resolve_wt(task)
         spec = self.cfg.engine_spec(task.engine)
@@ -603,3 +734,8 @@ class Orchestrator:
         timeline = f"{task.plan_generated_at or ''} 规划 → {datetime.now():%m-%d %H:%M} {done_label}"
         self.store.complete(record_id, branch, f"已完成并{done_label}分支", timeline)
         self.notifier.send_complete(task, branch, change_stats, duration, timeline)
+        # 已推送 → worktree 使命完成，回收并发槽并促活下一个排队任务。
+        # 未推送(push:false)时 worktree 是改动的唯一载体，保留不删。
+        if push:
+            self.wt.remove(proj["path"], record_id)
+            self._wake_next_queued(task.project)

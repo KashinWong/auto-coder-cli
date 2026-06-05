@@ -54,6 +54,8 @@ def main(argv=None) -> int:
 
     sub.add_parser("status", parents=[common], help="列出所有需求状态")
 
+    sub.add_parser("monitor", parents=[common], help="扫描僵尸任务并发告警卡")
+
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
@@ -81,6 +83,10 @@ def main(argv=None) -> int:
 
     if args.cmd == "dispatch-feishu":
         Orchestrator(cfg, store, notifier, router).dispatch_feishu()
+        return 0
+
+    if args.cmd == "monitor":
+        Orchestrator(cfg, store, notifier, router).monitor()
         return 0
 
     if args.cmd == "resume":

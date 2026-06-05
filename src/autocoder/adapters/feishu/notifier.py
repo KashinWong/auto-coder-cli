@@ -53,6 +53,12 @@ class FeishuCardNotifier(Notifier):
                         for o in q.options
                     ],
                 })
+                # 选项之外的兜底：允许填写下拉未覆盖的答案，与选中值合并。
+                els.append({
+                    "tag": "input", "name": f"{q.key}__other",
+                    "placeholder": {"tag": "plain_text",
+                                    "content": "选项以外？在此补充（选填）"},
+                })
             else:
                 els.append({
                     "tag": "input", "name": q.key,
@@ -60,6 +66,15 @@ class FeishuCardNotifier(Notifier):
                     "placeholder": {"tag": "plain_text", "content": "在此回答…"},
                 })
 
+        els.append({"tag": "hr"})
+        # 整卡级补充：让用户写问题之外、想额外交代的澄清细节。
+        els.append({"tag": "markdown", "content": "**📝 其他补充说明（选填）**"})
+        els.append({
+            "tag": "input", "name": "__supplement",
+            "input_type": "multiline_text",
+            "placeholder": {"tag": "plain_text",
+                            "content": "上面没问到、但你想补充的细节…"},
+        })
         els.append({"tag": "hr"})
         els.append({
             "tag": "button", "name": "clarify_submit_btn",
@@ -88,6 +103,26 @@ class FeishuCardNotifier(Notifier):
                    DURATION=duration, TIMELINE=timeline)
 
     def send_failure(self, task, stage, error, log_path, branch):
+        # 失败阶段决定重试动作：立项/规划失败重跑 plan，其余(编码/测试/构建/推送)重跑 execute。
+        if stage in ("立项", "规划"):
+            retry_action, retry_stage = "retry_plan", "plan"
+        else:
+            retry_action, retry_stage = "retry_execute", "execute"
         self._send("failure", TASK_TITLE=task.task_title or task.description,
-                   FAIL_STAGE=stage, ERROR_SUMMARY=error,
-                   LOG_PATH=log_path, BRANCH_NAME=branch)
+                   RECORD_ID=task.record_id, FAIL_STAGE=stage, ERROR_SUMMARY=error,
+                   LOG_PATH=log_path, BRANCH_NAME=branch,
+                   RETRY_ACTION=retry_action, RETRY_STAGE=retry_stage)
+
+    def send_queued(self, task, position):
+        self._send("queued", TASK_TITLE=task.task_title or task.description,
+                   QUEUE_POSITION=position)
+
+    def send_zombie_alert(self, task, status, kind, minutes):
+        from autocoder.adapters.notifier import ZOMBIE_RETRY
+        retry_action, stage = ZOMBIE_RETRY.get(kind, ("retry_execute", "execute"))
+        started = (getattr(task, f"{kind}_started_at", None)
+                   if kind != "clarify" else None) or "未记录"
+        self._send("zombie", TASK_TITLE=task.task_title or task.description,
+                   RECORD_ID=task.record_id, STATUS=status, KIND=kind,
+                   MINUTES=minutes, STARTED_AT=started,
+                   RETRY_ACTION=retry_action, STAGE=stage)

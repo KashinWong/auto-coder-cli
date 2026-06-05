@@ -1,0 +1,21 @@
+{
+  "config": {
+    "wide_screen_mode": true
+  },
+  "header": {
+    "template": "grey",
+    "title": {
+      "tag": "plain_text",
+      "content": "⏳ 已排队 · {{TASK_TITLE}}"
+    }
+  },
+  "elements": [
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "方案已批准。当前并发槽已满，前面还有 **{{QUEUE_POSITION}}** 个任务在执行。\n\n等待并发槽释放后会**自动开始**，无需再操作。"
+      }
+    }
+  ]
+}

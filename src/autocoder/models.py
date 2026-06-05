@@ -21,6 +21,8 @@ class Task:
     approved_at: Optional[str] = None
     completed_at: Optional[str] = None
     branch_info: Optional[str] = None
+    execute_started_at: Optional[str] = None
+    plan_started_at: Optional[str] = None
 
     def branch_name(self) -> str:
         return f"feature/auto-{self.record_id}"

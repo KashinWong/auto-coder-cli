@@ -14,6 +14,12 @@ def test_task_branch_name():
     assert t.branch_name() == "feature/auto-abc"
 
 
+def test_task_stage_timestamps_default_none():
+    t = Task(record_id="r1", description="x", priority="p")
+    assert t.execute_started_at is None
+    assert t.plan_started_at is None
+
+
 def test_decision_holds_action_and_form():
     d = Decision(action="clarify_submit", record_id="r1",
                  form={"scope": "只改前端"})

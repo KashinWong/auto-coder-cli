@@ -1,0 +1,64 @@
+{
+  "config": {
+    "wide_screen_mode": true
+  },
+  "header": {
+    "template": "orange",
+    "title": {
+      "tag": "plain_text",
+      "content": "⚠️ 任务疑似卡死 · {{TASK_TITLE}}"
+    }
+  },
+  "elements": [
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "**卡住状态**: {{STATUS}}\n**阶段**: {{KIND}}\n**已超过**: {{MINUTES}} 分钟无进展，且未检测到运行中的后台进程"
+      }
+    },
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "**最后开始时间**: {{STARTED_AT}}"
+      }
+    },
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "action",
+      "actions": [
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "🔄 重试"
+          },
+          "type": "primary",
+          "value": {
+            "ac_action": "{{RETRY_ACTION}}",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "{{STAGE}}",
+            "_skill": "auto-coder-agent"
+          }
+        },
+        {
+          "tag": "button",
+          "text": {
+            "tag": "plain_text",
+            "content": "📥 搁置"
+          },
+          "type": "danger",
+          "value": {
+            "ac_action": "reject_charter",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "charter",
+            "_skill": "auto-coder-agent"
+          }
+        }
+      ]
+    }
+  ]
+}

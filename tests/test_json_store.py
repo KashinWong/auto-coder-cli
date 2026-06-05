@@ -34,7 +34,15 @@ def test_completed_not_in_pending(tmp_path):
     assert store.fetch_pending() == []
 
 
-def test_set_pointers(tmp_path):
+def test_fetch_by_status_filters(tmp_path):
+    store = JsonTaskStore(str(tmp_path))
+    store.add(Task(record_id="r1", description="x", priority="p", status="待审批"))
+    store.add(Task(record_id="r2", description="y", priority="p", status="进行中"))
+    store.add(Task(record_id="r3", description="z", priority="p", status="待审批"))
+    ids = sorted(t.record_id for t in store.fetch_by_status("待审批"))
+    assert ids == ["r1", "r3"]
+    assert store.fetch_by_status("已完成") == []
+
     store = JsonTaskStore(str(tmp_path))
     store.add(Task(record_id="r1", description="x", priority="p"))
     store.set_clarify_pointer("r1", "specs/001-x/clarify.md")

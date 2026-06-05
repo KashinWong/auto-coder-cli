@@ -122,8 +122,8 @@ class FeishuBaseStore(TaskStore):
         if payload:
             self._upsert(task.record_id, payload)
 
-    def fetch_pending(self) -> list:
-        """拉所有记录，过滤 进展==待开始，按优先级排序。"""
+    def _list_all(self) -> list:
+        """拉全表记录，展平 select 数组，转成 Task 列表（不过滤状态）。"""
         resp = self._run_cli("+record-list", "--limit", "200")
         data = resp.get("data", {})
         rows = data.get("data", [])
@@ -133,23 +133,26 @@ class FeishuBaseStore(TaskStore):
         tasks = []
         for row, rid in zip(rows, record_ids):
             fields_dict = dict(zip(field_names, row))
-            status = fields_dict.get("进展")
-            # select 字段是数组
-            if isinstance(status, list):
-                status = status[0] if status else ""
-            if status == "待开始":
-                fields_dict_mapped = {}
-                for field_name, val in fields_dict.items():
-                    if isinstance(val, list) and val and isinstance(val[0], str):
-                        fields_dict_mapped[field_name] = val[0]
-                    else:
-                        fields_dict_mapped[field_name] = val
-                tasks.append(self._parse_record(rid, fields_dict_mapped))
+            fields_dict_mapped = {}
+            for field_name, val in fields_dict.items():
+                if isinstance(val, list) and val and isinstance(val[0], str):
+                    fields_dict_mapped[field_name] = val[0]
+                else:
+                    fields_dict_mapped[field_name] = val
+            tasks.append(self._parse_record(rid, fields_dict_mapped))
+        return tasks
+
+    def fetch_pending(self) -> list:
+        """过滤 进展==待开始，按优先级排序。"""
+        pending = [t for t in self._list_all() if t.status == "待开始"]
 
         def rank(t: Task) -> int:
             return _PRIORITY_ORDER.index(t.priority) if t.priority in _PRIORITY_ORDER else 99
 
-        return sorted(tasks, key=rank)
+        return sorted(pending, key=rank)
+
+    def fetch_by_status(self, status: str) -> list:
+        return [t for t in self._list_all() if t.status == status]
 
     def get(self, record_id: str) -> Task:
         resp = self._run_cli("+record-get", "--record-id", record_id)

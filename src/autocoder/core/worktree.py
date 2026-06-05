@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,14 @@ def gate_open(active: int, limit: int) -> bool:
 
 
 def active_count(project_path: str, exclude_record_id: str = None) -> int:
+    # 规范化大小写：config 与磁盘大小写不一致时，git 会把同一目录注册成
+    # 不同 worktree，虚高计数。realpath 取磁盘真实大小写后统一。
+    project_path = os.path.realpath(project_path)
+    # 先剪掉已被磁盘删除但仍注册的陈旧 worktree，另一个虚高来源。
+    subprocess.run(
+        ["git", "-C", project_path, "worktree", "prune"],
+        capture_output=True, text=True,
+    )
     result = subprocess.run(
         ["git", "-C", project_path, "worktree", "list", "--porcelain"],
         capture_output=True, text=True,
@@ -30,6 +39,7 @@ def active_count(project_path: str, exclude_record_id: str = None) -> int:
 
 
 def create(project_path: str, base_branch: str, record_id: str) -> str:
+    project_path = os.path.realpath(project_path)
     branch = branch_name(record_id)
     worktree_path = str(Path(project_path) / ".worktrees" / branch)
     Path(worktree_path).parent.mkdir(parents=True, exist_ok=True)
@@ -53,6 +63,7 @@ def create(project_path: str, base_branch: str, record_id: str) -> str:
 
 
 def remove(project_path: str, record_id: str) -> None:
+    project_path = os.path.realpath(project_path)
     branch = branch_name(record_id)
     worktree_path = str(Path(project_path) / ".worktrees" / branch)
     subprocess.run(

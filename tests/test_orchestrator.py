@@ -27,6 +27,7 @@ class FakeNotifier:
     def __init__(self):
         self.calls = []
         self.complete_args = None
+        self.queued_position = None
 
     def send_clarify(self, *a, **k): self.calls.append("clarify")
     def send_charter(self, *a, **k): self.calls.append("charter")
@@ -36,6 +37,13 @@ class FakeNotifier:
         self.complete_args = dict(branch=branch, change_stats=change_stats,
                                   duration=duration, timeline=timeline)
     def send_failure(self, *a, **k): self.calls.append("failure")
+    def send_queued(self, task, position):
+        self.calls.append("queued")
+        self.queued_position = position
+    def send_zombie_alert(self, task, status, kind, minutes):
+        self.calls.append("zombie")
+        self.zombie_args = dict(record_id=task.record_id, status=status,
+                                kind=kind, minutes=minutes)
 
 
 class ScriptedRouter:
@@ -105,6 +113,50 @@ class MutableRouter:
 
     def await_decision(self, record_id, stage, questions=None):
         return self._scripts[stage].pop(0)
+
+
+def test_merge_answers_appends_other_to_select():
+    """选项题除了选中值，还允许 {key}__other 自由补充，合并进同一答案。"""
+    pending = [{"key": "scope", "ask": "范围？"}]
+    form = {"scope": "只改前端", "scope__other": "也要兼容旧版浏览器"}
+    qa = Orchestrator._merge_answers(pending, form)
+    assert qa == [{"ask": "范围？",
+                   "answer": "只改前端（补充：也要兼容旧版浏览器）"}]
+
+
+def test_merge_answers_other_only_when_no_selection():
+    """没选任何选项、只填了 __other → 答案就是补充内容本身。"""
+    pending = [{"key": "scope", "ask": "范围？"}]
+    form = {"scope__other": "选项都不合适，应该按部门分批上线"}
+    qa = Orchestrator._merge_answers(pending, form)
+    assert qa == [{"ask": "范围？", "answer": "选项都不合适，应该按部门分批上线"}]
+
+
+def test_merge_answers_multi_select_with_other():
+    """多选题（answer 为 list）叠加 __other：list 末尾追加补充项。"""
+    pending = [{"key": "mods", "ask": "改哪些模块？"}]
+    form = {"mods": ["A", "B"], "mods__other": "还有 C 模块"}
+    qa = Orchestrator._merge_answers(pending, form)
+    assert qa == [{"ask": "改哪些模块？", "answer": ["A", "B", "还有 C 模块"]}]
+
+
+def test_merge_answers_global_supplement_is_separate_entry():
+    """整卡级 __supplement → 独立问答条目，不挂在任何具体问题下。"""
+    pending = [{"key": "scope", "ask": "范围？"}]
+    form = {"scope": "只改前端", "__supplement": "上线前先灰度 10%"}
+    qa = Orchestrator._merge_answers(pending, form)
+    assert qa == [
+        {"ask": "范围？", "answer": "只改前端"},
+        {"ask": "其他补充说明", "answer": "上线前先灰度 10%"},
+    ]
+
+
+def test_merge_answers_ignores_empty_other_and_supplement():
+    """空白的 __other / __supplement 不产生噪声条目，也不改原答案。"""
+    pending = [{"key": "scope", "ask": "范围？"}]
+    form = {"scope": "只改前端", "scope__other": "   ", "__supplement": ""}
+    qa = Orchestrator._merge_answers(pending, form)
+    assert qa == [{"ask": "范围？", "answer": "只改前端"}]
 
 
 def test_dispatch_revise_charter_then_resume(tmp_path):
@@ -218,6 +270,80 @@ def test_execute_runs_engine_and_completes(tmp_path, monkeypatch):
 
     assert "complete" in notifier.calls
     assert store.get("r1").status == "已完成"
+    # 执行入口应写入 execute_started_at（monitor 双信号之一）
+    assert store.get("r1").execute_started_at is not None
+
+
+def test_execute_completion_removes_worktree_and_wakes_queue(tmp_path):
+    """完成（push:true）后须回收 worktree 并促活排队任务——闭环并发闸。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    (wt_dir / "specs" / "001-x").mkdir(parents=True)
+    (wt_dir / "specs" / "001-x" / "tasks.md").write_text("- [ ] T001\n")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   project="demo", task_title="做事", engine="fake",
+                   base_branch="main", spec_dir="specs/001-x", status="进行中"))
+    notifier = FakeNotifier()
+
+    removed = []
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: removed.append(r)),
+        "active_count": staticmethod(lambda p, x=None: 3),  # 促活时仍满 → 不起新任务
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+    fake_git = type("G", (), {
+        "add_commit_push": staticmethod(lambda wt, msg, br, push=True: (True, "1 file")),
+    })
+
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}),
+                        worktree=fake_wt, git_ops=fake_git,
+                        engine_run=lambda spec, wd, prompt, log: EngineResult.SUCCESS,
+                        resolve_worktree=lambda task: str(wt_dir))
+    orch.execute("r1")
+
+    assert store.get("r1").status == "已完成"
+    assert removed == ["r1"]   # worktree 被回收，槽位释放
+
+
+def test_execute_completion_push_false_keeps_worktree(tmp_path):
+    """push:false 时 worktree 是改动唯一载体，完成后不得回收。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    cfg.projects["demo"]["push"] = False
+    store = JsonTaskStore(cfg.workspace_dir)
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    (wt_dir / "specs" / "001-x").mkdir(parents=True)
+    (wt_dir / "specs" / "001-x" / "tasks.md").write_text("- [ ] T001\n")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   project="demo", task_title="做事", engine="fake",
+                   base_branch="main", spec_dir="specs/001-x", status="进行中"))
+
+    removed = []
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: removed.append(r)),
+        "active_count": staticmethod(lambda p, x=None: 0),
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+    fake_git = type("G", (), {
+        "add_commit_push": staticmethod(lambda wt, msg, br, push=True: (True, "1 file")),
+    })
+
+    orch = Orchestrator(cfg, store, FakeNotifier(), ScriptedRouter({}),
+                        worktree=fake_wt, git_ops=fake_git,
+                        engine_run=lambda spec, wd, prompt, log: EngineResult.SUCCESS,
+                        resolve_worktree=lambda task: str(wt_dir))
+    orch.execute("r1")
+
+    assert store.get("r1").status == "已完成"
+    assert removed == []   # 未推送 → 保留 worktree
 
 
 def test_execute_push_false_completion_wording(tmp_path):
@@ -430,6 +556,99 @@ def test_advance_plan_approve_launches_execute(tmp_path):
     assert ("execute", "r1") in launched
 
 
+def test_advance_plan_approve_gate_closed_enqueues(tmp_path):
+    """门关着（并发槽满）→ 不执行，状态留待审批、写排队位置+批准时间、发已排队卡。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p",
+                   status="待审批", project="demo", summary="s", task_title="t"))
+    notifier = FakeNotifier()
+
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: None),
+        "active_count": staticmethod(lambda p, x=None: 3),  # 满
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+
+    launched = []
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}), worktree=fake_wt)
+    orch._launch_bg = lambda *a: launched.append(a)
+
+    orch.advance("r1", Decision("approve_plan", "r1", "plan"))
+
+    assert launched == []                       # 没执行
+    assert store.get("r1").status == "待审批"     # 留在待审批
+    assert store.get("r1").queue_position == 3
+    assert store.get("r1").approved_at          # FIFO 排序键已写
+    assert "queued" in notifier.calls
+    assert notifier.queued_position == 3
+
+
+def test_wake_next_queued_promotes_oldest_first(tmp_path):
+    """槽位释放后，按 approved_at FIFO 促活排队最久的一个：转进行中、清排队位、起 execute。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    # r_old 批准更早，应先被促活；r_new 更晚
+    store.add(Task(record_id="r_new", description="给 demo 加 B", priority="p",
+                   status="待审批", project="demo", queue_position=1,
+                   approved_at="2026-06-05 10:00:00"))
+    store.add(Task(record_id="r_old", description="给 demo 加 A", priority="p",
+                   status="待审批", project="demo", queue_position=0,
+                   approved_at="2026-06-05 09:00:00"))
+    notifier = FakeNotifier()
+
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: None),
+        "active_count": staticmethod(lambda p, x=None: 0),  # 有空槽
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+
+    launched = []
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}), worktree=fake_wt)
+    orch._launch_bg = lambda *a: launched.append(a)
+
+    orch._wake_next_queued("demo")
+
+    # 只促活最早的一个
+    assert launched == [("execute", "r_old")]
+    assert store.get("r_old").status == "进行中"
+    assert store.get("r_old").queue_position is None
+    # 较晚的仍在排队
+    assert store.get("r_new").status == "待审批"
+    assert store.get("r_new").queue_position == 1
+
+
+def test_wake_next_queued_noop_when_gate_closed(tmp_path):
+    """门仍关着时不促活任何任务。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="给 demo 加功能", priority="p",
+                   status="待审批", project="demo", queue_position=3,
+                   approved_at="2026-06-05 09:00:00"))
+    fake_wt = type("WT", (), {
+        "active_count": staticmethod(lambda p, x=None: 3),  # 仍满
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+    launched = []
+    orch = Orchestrator(cfg, store, FakeNotifier(), ScriptedRouter({}),
+                        worktree=fake_wt)
+    orch._launch_bg = lambda *a: launched.append(a)
+
+    orch._wake_next_queued("demo")
+
+    assert launched == []
+    assert store.get("r1").status == "待审批"
+    assert store.get("r1").queue_position == 3
+
+
 def test_dispatch_feishu_sends_clarify_and_exits(tmp_path):
     """dispatch_feishu → 发澄清卡、写 round:1、状态变 澄清中，立即返回。"""
     proj = tmp_path / "proj"
@@ -490,3 +709,145 @@ def test_execute_record_lock_blocks_duplicate(tmp_path):
     assert orch._acquire_lock("r1") is False  # 第二次拿不到
     orch._release_lock("r1")
     assert orch._acquire_lock("r1") is True
+
+
+# ---- monitor: 僵尸任务判定 -------------------------------------------------
+
+def test_is_zombie_pure_function():
+    from autocoder.core.orchestrator import is_zombie
+    # 只有「超时 且 进程已死」才是僵尸
+    assert is_zombie(stale=True, alive=False) is True
+    assert is_zombie(stale=True, alive=True) is False   # 还活着，慢任务
+    assert is_zombie(stale=False, alive=False) is False  # 没超时
+    assert is_zombie(stale=False, alive=True) is False
+
+
+def _monitor_orch(tmp_path, monkeypatch, alive=False):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    notifier = FakeNotifier()
+    # 控制进程信号
+    import autocoder.core.process_probe as probe
+    monkeypatch.setattr(probe, "worker_alive", lambda rid, kind: alive)
+    orch = Orchestrator(cfg, store, notifier, ScriptedRouter({}))
+    return orch, store, notifier
+
+
+def test_monitor_alerts_dead_execute_over_threshold(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=False)
+    old = (datetime.now() - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%S")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="进行中", project="demo", execute_started_at=old))
+    orch.monitor()
+    assert "zombie" in notifier.calls
+    assert notifier.zombie_args["status"] == "进行中"
+
+
+def test_monitor_no_alert_when_worker_alive(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=True)
+    old = (datetime.now() - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%S")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="进行中", project="demo", execute_started_at=old))
+    orch.monitor()
+    assert "zombie" not in notifier.calls   # 进程活着 → 不是僵尸
+
+
+def test_monitor_no_alert_within_threshold(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=False)
+    recent = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="进行中", project="demo", execute_started_at=recent))
+    orch.monitor()
+    assert "zombie" not in notifier.calls   # 未超时 → 不告警
+
+
+def test_monitor_alerts_dead_plan_over_threshold(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=False)
+    old = (datetime.now() - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="规划中", project="demo", plan_started_at=old))
+    orch.monitor()
+    assert "zombie" in notifier.calls
+    assert notifier.zombie_args["kind"] == "plan"
+
+
+def test_monitor_alerts_clarify_without_card(tmp_path, monkeypatch):
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=False)
+    # 澄清中但 progress 为空 → 发卡前崩溃，无卡可点
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="澄清中", project="demo", progress=""))
+    orch.monitor()
+    assert "zombie" in notifier.calls
+    assert notifier.zombie_args["status"] == "澄清中"
+
+
+def test_monitor_skips_clarify_with_card(tmp_path, monkeypatch):
+    orch, store, notifier = _monitor_orch(tmp_path, monkeypatch, alive=False)
+    # 澄清中且有 progress（卡已发）→ 正常等待用户，不告警
+    store.add(Task(record_id="r1", description="x", priority="p",
+                   status="澄清中", project="demo",
+                   progress='{"round":1,"qa":[],"pending":[{"key":"k","ask":"a"}]}'))
+    orch.monitor()
+    assert "zombie" not in notifier.calls
+
+
+# ---- advance: 僵尸/失败重试 -------------------------------------------------
+
+def _retry_orch(tmp_path, status, **task_kw):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cfg = _config(tmp_path, proj)
+    store = JsonTaskStore(cfg.workspace_dir)
+    store.add(Task(record_id="r1", description="x", priority="p", status=status,
+                   project="demo", summary="s", task_title="t",
+                   base_branch="main", **task_kw))
+    fake_wt = type("WT", (), {
+        "create": staticmethod(lambda p, b, r: "wt"),
+        "remove": staticmethod(lambda p, r: None),
+        "active_count": staticmethod(lambda p, x=None: 0),
+        "gate_open": staticmethod(lambda a, l: a < l),
+    })
+    orch = Orchestrator(cfg, store, FakeNotifier(), ScriptedRouter({}), worktree=fake_wt)
+    launched = []
+    orch._launch_bg = lambda *a: launched.append(a)
+    return orch, store, launched
+
+
+def test_advance_retry_execute_from_stalled(tmp_path):
+    """已停滞任务点重试执行 → 回到进行中并重新启动 execute worker。"""
+    orch, store, launched = _retry_orch(tmp_path, "已停滞")
+    orch.advance("r1", Decision("retry_execute", "r1", "execute"))
+    assert store.get("r1").status == "进行中"
+    assert ("execute", "r1") in launched
+
+
+def test_advance_retry_execute_from_zombie_running(tmp_path):
+    """进行中(僵尸)点重试执行 → 仍是进行中，重新启动 execute。"""
+    orch, store, launched = _retry_orch(tmp_path, "进行中")
+    orch.advance("r1", Decision("retry_execute", "r1", "execute"))
+    assert store.get("r1").status == "进行中"
+    assert ("execute", "r1") in launched
+
+
+def test_advance_retry_plan_from_stalled(tmp_path):
+    """规划阶段失败/卡死点重试 → 回到规划中并重启 plan worker。"""
+    orch, store, launched = _retry_orch(tmp_path, "已停滞")
+    orch.advance("r1", Decision("retry_plan", "r1", "plan"))
+    assert store.get("r1").status == "规划中"
+    assert ("plan", "r1") in launched
+
+
+def test_advance_reclarify_restarts_clarify(tmp_path):
+    """澄清无卡可点 → reclarify 重启澄清第 1 轮。"""
+    orch, store, launched = _retry_orch(tmp_path, "澄清中", progress="")
+    orch.clarify.predict = lambda *a, **k: __import__(
+        "autocoder.core.clarify", fromlist=["Prediction"]).Prediction([], [])
+    orch.advance("r1", Decision("reclarify", "r1", "clarify"))
+    assert store.get("r1").status == "澄清中"
+    assert "clarify" in orch.notifier.calls

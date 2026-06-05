@@ -13,6 +13,8 @@ class TaskStore(ABC):
     @abstractmethod
     def fetch_pending(self) -> list: ...
     @abstractmethod
+    def fetch_by_status(self, status: str) -> list: ...
+    @abstractmethod
     def get(self, record_id: str) -> Task: ...
     @abstractmethod
     def update_status(self, record_id: str, status: str) -> None: ...
@@ -63,6 +65,9 @@ class JsonTaskStore(TaskStore):
             return _PRIORITY_ORDER.index(t.priority) if t.priority in _PRIORITY_ORDER else 99
 
         return sorted(pending, key=rank)
+
+    def fetch_by_status(self, status: str) -> list:
+        return [t for t in self._all() if t.status == status]
 
     def _update(self, record_id: str, **fields) -> None:
         t = self.get(record_id)

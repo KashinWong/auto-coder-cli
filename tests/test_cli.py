@@ -70,3 +70,14 @@ def test_resume_invokes_orchestrator(tmp_path, monkeypatch):
     rc = main(["resume", rid, "--config", cfg_path])
     assert rc == 0
     assert called["rid"] == rid
+
+
+def test_monitor_invokes_orchestrator(tmp_path, monkeypatch):
+    cfg_path, ws = _cfg(tmp_path)
+    called = {}
+    import autocoder.cli as cli_mod
+    monkeypatch.setattr(cli_mod.Orchestrator, "monitor",
+                        lambda self: called.setdefault("ran", True))
+    rc = main(["monitor", "--config", cfg_path])
+    assert rc == 0
+    assert called.get("ran") is True

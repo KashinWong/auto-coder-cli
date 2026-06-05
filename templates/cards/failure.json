@@ -6,6 +6,23 @@
   },
   "elements": [
     { "tag": "div", "text": { "tag": "lark_md", "content": "**失败阶段**: {{FAIL_STAGE}}\n**错误**: {{ERROR_SUMMARY}}" } },
-    { "tag": "div", "text": { "tag": "lark_md", "content": "**日志**: {{LOG_PATH}}\n**分支(保留现场)**: {{BRANCH_NAME}}" } }
+    { "tag": "div", "text": { "tag": "lark_md", "content": "**日志**: {{LOG_PATH}}\n**分支(保留现场)**: {{BRANCH_NAME}}" } },
+    { "tag": "hr" },
+    {
+      "tag": "action",
+      "actions": [
+        {
+          "tag": "button",
+          "text": { "tag": "plain_text", "content": "🔄 重试" },
+          "type": "primary",
+          "value": {
+            "ac_action": "{{RETRY_ACTION}}",
+            "record_id": "{{RECORD_ID}}",
+            "stage": "{{RETRY_STAGE}}",
+            "_skill": "auto-coder-agent"
+          }
+        }
+      ]
+    }
   ]
 }

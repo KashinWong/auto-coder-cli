@@ -16,6 +16,19 @@ class Notifier(ABC):
     @abstractmethod
     def send_failure(self, task: Task, stage: str, error: str,
                      log_path: str, branch: str) -> None: ...
+    @abstractmethod
+    def send_queued(self, task: Task, position: int) -> None: ...
+    @abstractmethod
+    def send_zombie_alert(self, task: Task, status: str, kind: str,
+                          minutes: int) -> None: ...
+
+
+# kind → 重试卡片用的 ac_action / stage。monitor 与 notifier 共用，避免散落。
+ZOMBIE_RETRY = {
+    "execute": ("retry_execute", "execute"),
+    "plan": ("retry_plan", "plan"),
+    "clarify": ("reclarify", "clarify"),
+}
 
 
 def _title(task: Task) -> str:
@@ -72,3 +85,14 @@ class CliNotifier(Notifier):
         print(f"错误: {error}")
         print(f"日志: {log_path}")
         print(f"分支(留现场): {branch}")
+
+    def send_queued(self, task, position):
+        print(f"\n===== ⏳ 已排队 · {_title(task)} =====")
+        print(f"方案已批准，前面还有 {position} 个任务在执行，槽位释放后自动开始。")
+
+    def send_zombie_alert(self, task, status, kind, minutes):
+        print(f"\n===== ⚠️ 任务疑似卡死 · {_title(task)} =====")
+        print(f"卡住状态: {status}（{kind}）")
+        print(f"已超过 {minutes} 分钟无进展，且无运行中的后台进程。")
+        retry, _ = ZOMBIE_RETRY.get(kind, ("retry_execute", "execute"))
+        print(f"操作: 重试({retry}) / 搁置")
