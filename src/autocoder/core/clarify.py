@@ -14,6 +14,13 @@ class Question:
 
 
 @dataclass
+class Role:
+    """多角色预判中的一个视角定义。name 嵌入该角色 prompt，focus 指导其侧重。"""
+    name: str
+    focus: str
+
+
+@dataclass
 class Prediction:
     modules: list
     risks: list

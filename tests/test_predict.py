@@ -115,3 +115,67 @@ def test_engine_predict_feeds_prior_form_into_prompt(tmp_path):
     orch._engine_predict("加功能", str(proj),
                          prior_qa=[{"ask": "范围？", "answer": "只改前端"}])
     assert "只改前端" in captured["prompt"]
+
+
+# ---- US2 零回归：未配置 clarify_fanout 时恰好 1 次引擎调用 ----------------
+
+def test_engine_predict_single_shot_calls_capture_once(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    calls = []
+
+    def capture(spec, working_dir, prompt, timeout=None):
+        calls.append(prompt)
+        return '{"modules": ["a.py"], "risks": [], "questions": []}'
+
+    orch = _orch(tmp_path, proj, capture)
+    pred = orch._engine_predict("加功能", str(proj))
+    assert len(calls) == 1                    # 零额外调用
+    assert "综合者" not in calls[0]            # 未走 fanout 综合步
+    assert pred.modules == ["a.py"]
+
+
+# ---- US1 fanout 路径：项目开启 clarify_fanout → N+1 次调用、合成结果 -------
+
+class _FanoutCfg(_Cfg):
+    def __init__(self, tmp_path, project_path):
+        super().__init__(tmp_path, project_path)
+        self.projects["demo"]["clarify_fanout"] = {"enabled": True}
+
+
+def _fanout_orch(tmp_path, project_path, capture):
+    cfg = _FanoutCfg(tmp_path, project_path)
+    store = JsonTaskStore(cfg.workspace_dir)
+    return Orchestrator(cfg, store, type("N", (), {})(), type("R", (), {})(),
+                        worktree=type("WT", (), {})(), engine_capture=capture)
+
+
+def test_engine_predict_fanout_calls_n_plus_one_and_synthesizes(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    calls = []
+
+    def capture(spec, working_dir, prompt, timeout=None):
+        calls.append(prompt)
+        if "综合者" in prompt:
+            return ('{"modules": ["a.py", "b.py"], "risks": ["R"], '
+                    '"scope_hint": "只做X", "acceptance_hint": "Y完成", '
+                    '"ready": false, "ready_reason": "缺Z", '
+                    '"questions": [{"key": "z", "ask": "Z?", "type": "text"}]}')
+        return '{"modules": ["a.py"], "risks": [], "questions": []}'
+
+    orch = _fanout_orch(tmp_path, proj, capture)
+    pred = orch._engine_predict("加功能", str(proj))
+    # 默认 3 角色 + 1 综合 = 4 次。
+    assert len(calls) == 4
+    assert sum("综合者" in p for p in calls) == 1
+    # FR-007：合成结果含全部既有字段且类型不变。
+    assert isinstance(pred, Prediction)
+    assert pred.modules == ["a.py", "b.py"]
+    assert pred.risks == ["R"]
+    assert pred.scope_hint == "只做X"
+    assert pred.acceptance_hint == "Y完成"
+    assert pred.ready is False
+    assert pred.ready_reason == "缺Z"
+    assert len(pred.questions) == 1 and pred.questions[0].ask == "Z?"
+

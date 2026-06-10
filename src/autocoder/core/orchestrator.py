@@ -8,6 +8,7 @@ from autocoder.core import state_machine as sm
 from autocoder.core import worktree as wt_mod
 from autocoder.core import planner
 from autocoder.core.clarify import ClarifyOrchestrator
+from autocoder.core.predict import build_predict_prompt, parse_prediction
 from autocoder.core.engine_runner import (
     run_engine, run_engine_capture, run_command, EngineResult,
 )
@@ -115,11 +116,30 @@ class Orchestrator:
         spec = self._predict_engine_spec(project_path)
         if not spec:
             return Prediction([], [])
-        prompt = self._build_predict_prompt(description, prior_qa)
-        # 预判要快，给较短超时，避免卡澄清。引擎自带 timeout 可能是 1800s。
         timeout = min(spec.get("timeout", 1800), 180)
+        # 项目级 opt-in：配了 clarify_fanout.enabled 且有可用角色 → 多角色并行预判。
+        # 否则走原有单次单角色路径（零额外引擎调用、零回归）。
+        proj = self._predict_project_cfg(project_path)
+        fanout_cfg = (proj or {}).get("clarify_fanout") or {}
+        if fanout_cfg.get("enabled"):
+            from autocoder.core import role_predict
+            roles = role_predict.load_roles(fanout_cfg)
+            if roles:
+                return role_predict.fanout_predict(
+                    roles=roles, description=description, prior_qa=prior_qa,
+                    spec=spec, project_path=project_path, timeout=timeout,
+                    engine_capture=self.engine_capture,
+                    synth_timeout=min(spec.get("timeout", 1800), 60))
+        prompt = build_predict_prompt(description, prior_qa)
         out = self.engine_capture(spec, project_path, prompt, timeout)
-        return self._parse_prediction(out)
+        return parse_prediction(out)
+
+    def _predict_project_cfg(self, project_path):
+        """按 project_path 反查项目配置 dict；找不到返回 None。"""
+        for proj in self.cfg.projects.values():
+            if proj.get("path") == project_path:
+                return proj
+        return None
 
     def _predict_engine_spec(self, project_path):
         """按 project_path 反查它配的引擎 spec；找不到用默认引擎。"""
@@ -130,104 +150,6 @@ class Orchestrator:
         if self.cfg.default_engine:
             return self.cfg.engine_spec(self.cfg.default_engine)
         return None
-
-    def _build_predict_prompt(self, description, prior_qa):
-        import json as _json
-        lines = [
-            "你是需求澄清助手。请先快速浏览当前项目代码结构，再对下面的需求做预判。",
-            "",
-            f"需求：{description}",
-            "",
-        ]
-        if prior_qa:
-            lines += [
-                "用户已在前几轮澄清中回答了以下问题，请据此判断信息是否已足够立项；",
-                "已答的不要再问，只针对仍然影响实现/验收的关键缺口提问：",
-                _json.dumps(prior_qa, ensure_ascii=False),
-                "",
-            ]
-        lines += [
-            "只输出一段 JSON（不要任何额外文字、不要 markdown 代码块），字段：",
-            '{',
-            '  "modules": ["预判涉及的文件或模块名", ...],',
-            '  "risks": ["实现该需求的技术风险点", ...],',
-            '  "scope_hint": "一句话预判范围边界：做什么/明确不做什么",',
-            '  "acceptance_hint": "一句话预判验收标准：怎样算完成",',
-            '  "ready": true/false,',
-            '  "ready_reason": "一句话说明为何够了/还缺什么",',
-            '  "questions": [',
-            '    {"key": "短标识", "ask": "要问用户的问题",',
-            '     "type": "text | single_select | multi_select",',
-            '     "options": ["仅 select 类型需要的候选项", ...]}',
-            '  ]',
-            '}',
-            "要求：",
-            "- modules 必须是项目里真实存在的文件/模块。",
-            "- 只问真正阻断实现或验收的关键点，能从代码/需求推断的不要问。",
-            "- 最多提 3 个问题；信息已足够时 ready=true 且 questions 为空数组。",
-            "- 能用选项回答的尽量用 single_select/multi_select，减轻用户负担。",
-        ]
-        return "\n".join(lines)
-
-    def _parse_prediction(self, out):
-        import json as _json
-        import re
-        from autocoder.core.clarify import Prediction, Question
-        if not out or not out.strip():
-            return Prediction([], [])
-        # 引擎可能裹了 ```json ``` 或夹带前后文字，抓第一个 {...} 块。
-        text = out.strip()
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if not m:
-            return Prediction([], [])
-        try:
-            data = _json.loads(m.group(0))
-        except (ValueError, TypeError):
-            return Prediction([], [])
-        if not isinstance(data, dict):
-            return Prediction([], [])
-
-        def _as_list(v):
-            if isinstance(v, list):
-                return [str(x) for x in v if str(x).strip()]
-            if isinstance(v, str) and v.strip():
-                return [v.strip()]
-            return []
-
-        def _parse_questions(v):
-            qs = []
-            if not isinstance(v, list):
-                return qs
-            for i, item in enumerate(v):
-                # 兼容引擎仍按旧格式返回纯字符串问题的情况。
-                if isinstance(item, str):
-                    if item.strip():
-                        qs.append(Question(key=f"q{i}", ask=item.strip()))
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                ask = str(item.get("ask", "") or "").strip()
-                if not ask:
-                    continue
-                qtype = str(item.get("type", "text") or "text").strip()
-                if qtype not in ("text", "single_select", "multi_select"):
-                    qtype = "text"
-                opts = _as_list(item.get("options"))
-                if qtype != "text" and not opts:
-                    qtype = "text"  # select 无候选项则退化为文本
-                key = str(item.get("key", "") or f"q{i}").strip() or f"q{i}"
-                qs.append(Question(key=key, ask=ask, type=qtype, options=opts))
-            return qs[:3]  # 每张卡最多 3 个问题
-
-        return Prediction(
-            modules=_as_list(data.get("modules")),
-            risks=_as_list(data.get("risks")),
-            scope_hint=str(data.get("scope_hint", "") or "").strip(),
-            acceptance_hint=str(data.get("acceptance_hint", "") or "").strip(),
-            ready=bool(data.get("ready", False)),
-            ready_reason=str(data.get("ready_reason", "") or "").strip(),
-            questions=_parse_questions(data.get("questions")),
-        )
 
     def _set_status(self, record_id, to):
         cur = self.store.get(record_id).status
