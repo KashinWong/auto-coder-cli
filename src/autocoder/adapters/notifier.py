@@ -9,7 +9,8 @@ class Notifier(ABC):
     @abstractmethod
     def send_charter(self, task: Task, summary: str) -> None: ...
     @abstractmethod
-    def send_plan(self, task: Task, plan_summary: str, task_count: int, branch: str) -> None: ...
+    def send_plan(self, task: Task, plan_summary: str, task_count: int, branch: str,
+                  spec_content: str = "") -> None: ...
     @abstractmethod
     def send_complete(self, task: Task, branch: str, change_stats: str,
                       duration: str, timeline: str) -> None: ...
@@ -65,11 +66,13 @@ class CliNotifier(Notifier):
         print(summary)
         print("操作: 立项 / 改 / 再聊 / 拒")
 
-    def send_plan(self, task, plan_summary, task_count, branch):
+    def send_plan(self, task, plan_summary, task_count, branch, spec_content=""):
         print(f"\n===== 📐 方案审批 · {_title(task)} =====")
         print(f"分支: {branch}")
         print(f"任务数: {task_count}")
         print(f"方案摘要:\n{plan_summary}")
+        if spec_content:
+            print(f"\n{spec_content}")
         print("操作: 批准 / 退·改方案 / 退·重新理解")
 
     def send_complete(self, task, branch, change_stats, duration, timeline):

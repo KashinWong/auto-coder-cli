@@ -425,6 +425,11 @@ class Orchestrator:
             else:
                 self._enqueue(rid, task, active)
         elif action == "revise_plan":
+            notes = (decision.form or {}).get("revision_notes", "").strip()
+            if notes:
+                t = self.store.get(rid)
+                t.revise_notes = notes
+                self.store._save(t)
             self._set_status(rid, "规划中")
             self._launch_bg("plan", rid)
         elif action == "reunderstand":
@@ -530,7 +535,8 @@ class Orchestrator:
         project_key, _ = self._project_for(task)
         proj = self.cfg.projects[project_key]
         wtpath = self._resolve_wt_by_key(project_key, record_id)
-        self._plan(task, project_key, proj, wtpath, task.summary)
+        self._plan(task, project_key, proj, wtpath, task.summary,
+                   revise_notes=task.revise_notes)
 
     def _drive(self, rid):
         """按当前状态路由到对应阶段，顺序贯穿到下一个卡点或终态。"""
@@ -614,7 +620,8 @@ class Orchestrator:
         project_key, _ = self._project_for(task)
         proj = self.cfg.projects[project_key]
         wtpath = self._resolve_wt_by_key(project_key, rid)
-        self._plan(task, project_key, proj, wtpath, task.summary)
+        self._plan(task, project_key, proj, wtpath, task.summary,
+                   revise_notes=task.revise_notes)
         return True
 
     def _run_plan_approval(self, rid):
@@ -642,7 +649,8 @@ class Orchestrator:
         return str(Path(proj["path"]) / ".worktrees" / wt_mod.branch_name(rid))
 
 
-    def _plan(self, task, project_key, proj, worktree_path, requirement):
+    def _plan(self, task, project_key, proj, worktree_path, requirement,
+              revise_notes=None):
         # 阶段开始时间：供 monitor 判定规划是否卡死（双信号之一）。
         ts = self.store.get(task.record_id)
         ts.plan_started_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -653,11 +661,21 @@ class Orchestrator:
         spec = self.cfg.engine_spec(engine_name)
         prompt = (f"按 spec-kit 约定，在 {spec_dir}/ 下产出 spec.md、plan.md、tasks.md。\n"
                   f"需求：\n{requirement}\n严格按需求范围，不额外加功能。")
+        if revise_notes:
+            prompt += f"\n\n用户对上一版方案的修改意见（请在新方案中体现）：\n{revise_notes}"
         log = str(Path(self.cfg.workspace_dir) / task.record_id / "plan.log")
         Path(log).parent.mkdir(parents=True, exist_ok=True)
-        self.engine_run(spec, worktree_path, prompt, log)
-        tasks_md = str(Path(worktree_path, spec_dir, "tasks.md"))
-        n = planner.count_tasks(tasks_md)
+        result = self.engine_run(spec, worktree_path, prompt, log)
+        if result != EngineResult.SUCCESS:
+            stage = "规划超时" if result == EngineResult.TIMEOUT else "规划"
+            self.notifier.send_failure(task, stage, "引擎执行失败", log,
+                                       task.branch_name())
+            self.store.update_status(task.record_id, "已停滞")
+            return
+        tasks_md_path = Path(worktree_path, spec_dir, "tasks.md")
+        spec_md_path = Path(worktree_path, spec_dir, "spec.md")
+        n = planner.count_tasks(str(tasks_md_path))
+        spec_content = self._read_spec_content(spec_md_path, tasks_md_path)
         now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         # 写回 task 元数据
         t = self.store.get(task.record_id)
@@ -669,7 +687,23 @@ class Orchestrator:
         self.store._save(t)
         self.store.set_clarify_pointer(task.record_id, f"{spec_dir}/clarify.md")
         self._set_status(task.record_id, "待审批")
-        self.notifier.send_plan(t, requirement, n, t.branch_name())
+        self.notifier.send_plan(t, requirement, n, t.branch_name(), spec_content)
+
+    @staticmethod
+    def _read_spec_content(spec_md_path, tasks_md_path, max_len=4000):
+        """读 spec.md 和 tasks.md，拼成供卡片展示的内容，总长度截断到 max_len。"""
+        parts = []
+        for label, path in [("任务清单", tasks_md_path), ("方案设计", spec_md_path)]:
+            if Path(path).exists():
+                text = Path(path).read_text().strip()
+                if text:
+                    parts.append(f"## {label}\n{text}")
+        if not parts:
+            return ""
+        combined = "\n\n---\n\n".join(parts)
+        if len(combined) > max_len:
+            combined = combined[:max_len] + "\n\n…（内容已截断）"
+        return combined
 
     # ---- execute ------------------------------------------------------
     def execute(self, record_id):

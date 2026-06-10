@@ -92,10 +92,11 @@ class FeishuCardNotifier(Notifier):
         self._send("charter", TASK_TITLE=task.task_title or task.description,
                    RECORD_ID=task.record_id, CHARTER_SUMMARY=summary)
 
-    def send_plan(self, task, plan_summary, task_count, branch):
+    def send_plan(self, task, plan_summary, task_count, branch, spec_content=""):
         self._send("plan", TASK_TITLE=task.task_title or task.description,
                    RECORD_ID=task.record_id, PLAN_SUMMARY=plan_summary,
-                   TASKS_COUNT=task_count, BRANCH_NAME=branch)
+                   TASKS_COUNT=task_count, BRANCH_NAME=branch,
+                   SPEC_CONTENT=spec_content or "（spec 文件暂未生成）")
 
     def send_complete(self, task, branch, change_stats, duration, timeline):
         self._send("complete", TASK_TITLE=task.task_title or task.description,

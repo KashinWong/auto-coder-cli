@@ -23,6 +23,7 @@ class Task:
     branch_info: Optional[str] = None
     execute_started_at: Optional[str] = None
     plan_started_at: Optional[str] = None
+    revise_notes: Optional[str] = None
 
     def branch_name(self) -> str:
         return f"feature/auto-{self.record_id}"

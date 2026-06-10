@@ -1,6 +1,7 @@
 {
+  "schema": "2.0",
   "config": {
-    "wide_screen_mode": true
+    "update_multi": true
   },
   "header": {
     "template": "turquoise",
@@ -9,70 +10,115 @@
       "content": "🗺️ 方案审批 · {{TASK_TITLE}}"
     }
   },
-  "elements": [
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "{{PLAN_SUMMARY}}"
-      }
-    },
-    {
-      "tag": "div",
-      "text": {
-        "tag": "lark_md",
-        "content": "**任务数**: {{TASKS_COUNT}}　**分支**: {{BRANCH_NAME}}"
-      }
-    },
-    {
-      "tag": "hr"
-    },
-    {
-      "tag": "action",
-      "actions": [
-        {
-          "tag": "button",
-          "text": {
-            "tag": "plain_text",
-            "content": "✅ 批准"
-          },
-          "type": "primary",
-          "value": {
-            "ac_action": "approve_plan",
-            "record_id": "{{RECORD_ID}}",
-            "stage": "plan",
-            "_skill": "auto-coder-agent"
-          }
-        },
-        {
-          "tag": "button",
-          "text": {
-            "tag": "plain_text",
-            "content": "❌ 退·改方案"
-          },
-          "type": "default",
-          "value": {
-            "ac_action": "revise_plan",
-            "record_id": "{{RECORD_ID}}",
-            "stage": "plan",
-            "_skill": "auto-coder-agent"
-          }
-        },
-        {
-          "tag": "button",
-          "text": {
-            "tag": "plain_text",
-            "content": "❌ 退·重新理解"
-          },
-          "type": "danger",
-          "value": {
-            "ac_action": "reunderstand",
-            "record_id": "{{RECORD_ID}}",
-            "stage": "plan",
-            "_skill": "auto-coder-agent"
-          }
+  "body": {
+    "elements": [
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "## 需求\n{{PLAN_SUMMARY}}"
         }
-      ]
-    }
-  ]
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "{{SPEC_CONTENT}}"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**任务数**: {{TASKS_COUNT}}　**分支**: {{BRANCH_NAME}}"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "form",
+        "name": "plan_form",
+        "elements": [
+          {
+            "tag": "input",
+            "name": "revision_notes",
+            "label": {
+              "tag": "plain_text",
+              "content": "退回建议（退·改方案时填写）"
+            },
+            "input_type": "multiline_text",
+            "placeholder": {
+              "tag": "plain_text",
+              "content": "说明需要调整的内容，引擎会在原方案基础上修改…"
+            }
+          },
+          {
+            "tag": "button",
+            "text": {
+              "tag": "plain_text",
+              "content": "✅ 批准"
+            },
+            "type": "primary",
+            "behaviors": [
+              {
+                "type": "callback",
+                "value": {
+                  "ac_action": "approve_plan",
+                  "record_id": "{{RECORD_ID}}",
+                  "stage": "plan",
+                  "_skill": "auto-coder-agent"
+                }
+              }
+            ]
+          },
+          {
+            "tag": "button",
+            "text": {
+              "tag": "plain_text",
+              "content": "❌ 退·改方案"
+            },
+            "type": "default",
+            "form_action_type": "submit",
+            "behaviors": [
+              {
+                "type": "callback",
+                "value": {
+                  "ac_action": "revise_plan",
+                  "record_id": "{{RECORD_ID}}",
+                  "stage": "plan",
+                  "_skill": "auto-coder-agent"
+                }
+              }
+            ]
+          },
+          {
+            "tag": "button",
+            "text": {
+              "tag": "plain_text",
+              "content": "❌ 退·重新理解"
+            },
+            "type": "danger",
+            "behaviors": [
+              {
+                "type": "callback",
+                "value": {
+                  "ac_action": "reunderstand",
+                  "record_id": "{{RECORD_ID}}",
+                  "stage": "plan",
+                  "_skill": "auto-coder-agent"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
 }
