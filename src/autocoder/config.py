@@ -39,6 +39,11 @@ def load_config(path: str) -> Config:
             raise ValueError(f"config missing required key: {key}")
     engines = dict(data["engines"])
     default_engine = engines.pop("default", None)
+    # default 引擎是所有阶段/角色的最终回退兜底，必须真实存在；
+    # 否则运行时回退到它会 KeyError。在加载期 fail-fast，给清晰报错。
+    if default_engine is not None and default_engine not in engines:
+        raise ValueError(
+            f"engines.default '{default_engine}' 未在 engines 中定义")
     return Config(
         adapters=data["adapters"],
         workspace_dir=data["workspace_dir"],

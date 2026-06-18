@@ -11,11 +11,25 @@ concurrency:
 projects:
   example-project:
     path: /path/to/your/project
-    engine: claude-code
+    engine: claude-code            # 默认/兜底引擎；下面所有阶段/角色未指定时都用它
     match_keywords: ["关键词1", "关键词2"]
     base_branch: main
     test_command: "npm test"
     build_command: "npm run build"
+    # 分阶段多引擎（选填）：给澄清/规划/执行分别指定引擎（即模型）。
+    # 未列出的阶段回退到上面的 engine。引擎名须在下方 engines 中定义。
+    # stage_engines:
+    #   clarify: claude-sonnet     # 澄清预判用 sonnet
+    #   plan:    claude-code       # 规划(spec/plan/tasks)用 opus
+    #   execute: claude-code       # 执行(写代码)用 opus（规划时定下，写入 task.engine）
+    # 多角色并行预判（选填，按项目 opt-in）：每个角色可单独指定引擎。
+    # clarify_fanout:
+    #   enabled: true
+    #   synth_engine: claude-code  # 综合归并步用哪个引擎（选填，回退项目/澄清引擎）
+    #   roles:                     # 省略 roles 用内置默认；engine 选填，缺省回退项目引擎
+    #     - {name: 产品经理,   focus: 需求范围边界、用户价值、验收标准, engine: claude-sonnet}
+    #     - {name: 架构师,     focus: 涉及模块、集成点、技术风险,       engine: claude-code}
+    #     - {name: 测试工程师, focus: 边界条件、异常路径、验收用例,     engine: claude-haiku}
     knowledge:
       - path: /path/to/your/project/docs/
         label: 技术文档
@@ -23,12 +37,26 @@ projects:
         include: "*.md"
 
 engines:
+  # 引擎 = 命名的执行器配置。模型藏在 env.CLAUDE_MODEL —— 同一个 claude 命令
+  # 配不同 CLAUDE_MODEL 即得到“不同模型的引擎”，供 stage_engines / role.engine 引用。
   claude-code:
     command: claude
     args: ["--print", "--dangerously-skip-permissions"]
     timeout: 1800
     env:
-      CLAUDE_MODEL: your-model-name
+      CLAUDE_MODEL: claude-opus-4-8
+  claude-sonnet:
+    command: claude
+    args: ["--print", "--dangerously-skip-permissions"]
+    timeout: 1800
+    env:
+      CLAUDE_MODEL: claude-sonnet-4-6
+  claude-haiku:
+    command: claude
+    args: ["--print", "--dangerously-skip-permissions"]
+    timeout: 1800
+    env:
+      CLAUDE_MODEL: claude-haiku-4-5-20251001
   codex:
     command: codex
     args: ["--quiet", "--auto-edit"]

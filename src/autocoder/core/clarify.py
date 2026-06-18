@@ -15,9 +15,11 @@ class Question:
 
 @dataclass
 class Role:
-    """多角色预判中的一个视角定义。name 嵌入该角色 prompt，focus 指导其侧重。"""
+    """多角色预判中的一个视角定义。name 嵌入该角色 prompt，focus 指导其侧重。
+    engine 选填：该角色单独用哪个引擎（模型）；None 时回退项目引擎。"""
     name: str
     focus: str
+    engine: Optional[str] = None
 
 
 @dataclass

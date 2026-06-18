@@ -40,8 +40,9 @@ def load_roles(fanout_cfg):
             continue
         name = str(item.get("name", "") or "").strip()
         focus = str(item.get("focus", "") or "").strip()
+        engine = str(item.get("engine", "") or "").strip() or None
         if name and focus:
-            roles.append(Role(name=name, focus=focus))
+            roles.append(Role(name=name, focus=focus, engine=engine))
     return roles or list(DEFAULT_ROLES)
 
 
@@ -134,22 +135,37 @@ def merge_predictions(role_preds):
 
 
 def fanout_predict(*, roles, description, prior_qa, spec, project_path,
-                   timeout, engine_capture, synth_timeout=None):
+                   timeout, engine_capture, synth_timeout=None,
+                   resolve_spec=None, synth_engine=None):
     """多角色并行预判 + 综合，返回单个 Prediction。
 
     roles 为空时调用方不应进入此函数（应走单角色路径），这里防御性返回空预判。
+
+    resolve_spec 选填：engine_name -> spec dict 的解析器。传入时各角色按 role.engine
+    取各自 spec（不同模型），综合步按 synth_engine 取 spec；缺失或未传一律回退默认 spec。
+    每个 spec 用其自带 timeout 再套与默认相同的 min 上限，保持语义。
     """
     if not roles:
         return Prediction([], [], ok=False)
 
+    def _spec_and_timeout(engine_name, default_spec, default_timeout, cap):
+        """按引擎名解析 spec 与 timeout；解析不到回退默认。cap 为该步的上限秒数。"""
+        if resolve_spec and engine_name:
+            s = resolve_spec(engine_name)
+            if s:
+                return s, min(s.get("timeout", 1800), cap)
+        return default_spec, default_timeout
+
     def _run_role(role):
         # 单角色失败/超时：engine_capture 返回空串 → parse 得空预判；
         # 异常同样吞掉降级为空，绝不让单个角色拖垮整体。
+        role_spec, role_timeout = _spec_and_timeout(
+            role.engine, spec, timeout, 180)
         try:
             out = engine_capture(
-                spec, project_path,
+                role_spec, project_path,
                 build_predict_prompt(description, prior_qa, role=role),
-                timeout)
+                role_timeout)
             return parse_prediction(out)
         except Exception:
             return Prediction([], [], ok=False)
@@ -163,11 +179,14 @@ def fanout_predict(*, roles, description, prior_qa, spec, project_path,
         return Prediction([], [], ok=False)
 
     # 综合步：不扫项目，给更短超时。失败则确定性兜底合并。
+    synth_spec, synth_to = _spec_and_timeout(
+        synth_engine, spec,
+        synth_timeout if synth_timeout is not None else timeout, 60)
     try:
         synth_out = engine_capture(
-            spec, project_path,
+            synth_spec, project_path,
             build_synthesis_prompt(description, role_preds),
-            synth_timeout)
+            synth_to)
         synth = parse_prediction(synth_out)
     except Exception:
         synth = Prediction([], [], ok=False)

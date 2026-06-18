@@ -125,11 +125,15 @@ class Orchestrator:
             from autocoder.core import role_predict
             roles = role_predict.load_roles(fanout_cfg)
             if roles:
+                # 各角色/综合步按各自 engine 名解析 spec，回退到项目澄清引擎。
+                resolve = lambda name: self._engine_spec_for(proj, engine_name=name)
                 return role_predict.fanout_predict(
                     roles=roles, description=description, prior_qa=prior_qa,
                     spec=spec, project_path=project_path, timeout=timeout,
                     engine_capture=self.engine_capture,
-                    synth_timeout=min(spec.get("timeout", 1800), 60))
+                    synth_timeout=min(spec.get("timeout", 1800), 60),
+                    resolve_spec=resolve,
+                    synth_engine=fanout_cfg.get("synth_engine"))
         prompt = build_predict_prompt(description, prior_qa)
         out = self.engine_capture(spec, project_path, prompt, timeout)
         return parse_prediction(out)
@@ -142,14 +146,31 @@ class Orchestrator:
         return None
 
     def _predict_engine_spec(self, project_path):
-        """按 project_path 反查它配的引擎 spec；找不到用默认引擎。"""
-        for proj in self.cfg.projects.values():
-            if proj.get("path") == project_path:
-                name = proj.get("engine", self.cfg.default_engine)
-                return self.cfg.engine_spec(name)
-        if self.cfg.default_engine:
-            return self.cfg.engine_spec(self.cfg.default_engine)
-        return None
+        """按 project_path 反查澄清阶段的引擎 spec；找不到用默认引擎。"""
+        proj = self._predict_project_cfg(project_path)
+        return self._engine_spec_for(proj, stage="clarify")
+
+    def _engine_name_for(self, proj, stage=None, engine_name=None):
+        """解析某阶段/显式引擎的引擎名。回退链：
+        engine_name → proj.stage_engines[stage] → proj.engine → default_engine。
+        不存在的引擎名一律降级为 default（容错优先，不阻断流程）。"""
+        candidates = [
+            engine_name,
+            ((proj or {}).get("stage_engines") or {}).get(stage) if stage else None,
+            (proj or {}).get("engine"),
+            self.cfg.default_engine,
+        ]
+        for name in candidates:
+            if name and name in self.cfg.engines:
+                return name
+        return self.cfg.default_engine
+
+    def _engine_spec_for(self, proj, stage=None, engine_name=None):
+        """解析某阶段/显式引擎的 spec dict；解析不到引擎返回 None。"""
+        name = self._engine_name_for(proj, stage=stage, engine_name=engine_name)
+        if not name:
+            return None
+        return self.cfg.engine_spec(name)
 
     def _set_status(self, record_id, to):
         cur = self.store.get(record_id).status
@@ -579,8 +600,11 @@ class Orchestrator:
         self.store._save(ts)
         spec_dir = planner.next_spec_dir(worktree_path, task.task_title or "")
         Path(worktree_path, spec_dir).mkdir(parents=True, exist_ok=True)
-        engine_name = proj.get("engine", self.cfg.default_engine)
-        spec = self.cfg.engine_spec(engine_name)
+        # plan 与 execute 各自解析引擎：plan 引擎跑规划，execute 引擎此刻定下、
+        # 写回 task.engine 供执行阶段直接读（execute 端无需再解析）。
+        plan_engine = self._engine_name_for(proj, stage="plan")
+        execute_engine = self._engine_name_for(proj, stage="execute")
+        spec = self.cfg.engine_spec(plan_engine)
         prompt = (f"按 spec-kit 约定，在 {spec_dir}/ 下产出 spec.md、plan.md、tasks.md。\n"
                   f"需求：\n{requirement}\n严格按需求范围，不额外加功能。")
         if revise_notes:
@@ -602,7 +626,7 @@ class Orchestrator:
         # 写回 task 元数据
         t = self.store.get(task.record_id)
         t.project = project_key
-        t.engine = engine_name
+        t.engine = execute_engine
         t.spec_dir = spec_dir
         t.base_branch = proj["base_branch"]
         t.plan_generated_at = now
