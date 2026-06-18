@@ -178,10 +178,11 @@ def fanout_predict(*, roles, description, prior_qa, spec, project_path,
         # 全部角色失败/超时 → 空预判降级（不阻断澄清）。
         return Prediction([], [], ok=False)
 
-    # 综合步：不扫项目，给更短超时。失败则确定性兜底合并。
+    # 综合步：不扫项目本应较轻，但高 effort 综合引擎(如 opus+max)推理重，
+    # 与角色步同给 180s 上限，避免被过短超时砍掉而每次走兜底合并。
     synth_spec, synth_to = _spec_and_timeout(
         synth_engine, spec,
-        synth_timeout if synth_timeout is not None else timeout, 60)
+        synth_timeout if synth_timeout is not None else timeout, 180)
     try:
         synth_out = engine_capture(
             synth_spec, project_path,

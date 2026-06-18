@@ -131,7 +131,7 @@ class Orchestrator:
                     roles=roles, description=description, prior_qa=prior_qa,
                     spec=spec, project_path=project_path, timeout=timeout,
                     engine_capture=self.engine_capture,
-                    synth_timeout=min(spec.get("timeout", 1800), 60),
+                    synth_timeout=min(spec.get("timeout", 1800), 180),
                     resolve_spec=resolve,
                     synth_engine=fanout_cfg.get("synth_engine"))
         prompt = build_predict_prompt(description, prior_qa)
