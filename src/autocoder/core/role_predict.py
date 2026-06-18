@@ -45,11 +45,6 @@ def load_roles(fanout_cfg):
     return roles or list(DEFAULT_ROLES)
 
 
-def _is_empty(pred):
-    """角色无有效产出的判定：模块/风险/问题全空且无范围验收看法。"""
-    return not (pred.modules or pred.risks or pred.questions
-                or pred.scope_hint or pred.acceptance_hint)
-
 
 def build_synthesis_prompt(description, role_preds):
     """综合步 prompt：只对各角色文本归并去重，明确不再扫描项目。"""
@@ -145,7 +140,7 @@ def fanout_predict(*, roles, description, prior_qa, spec, project_path,
     roles 为空时调用方不应进入此函数（应走单角色路径），这里防御性返回空预判。
     """
     if not roles:
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
 
     def _run_role(role):
         # 单角色失败/超时：engine_capture 返回空串 → parse 得空预判；
@@ -157,15 +152,15 @@ def fanout_predict(*, roles, description, prior_qa, spec, project_path,
                 timeout)
             return parse_prediction(out)
         except Exception:
-            return Prediction([], [])
+            return Prediction([], [], ok=False)
 
     with ThreadPoolExecutor(max_workers=len(roles)) as ex:
         results = list(ex.map(_run_role, roles))
 
-    role_preds = [p for p in results if not _is_empty(p)]
+    role_preds = [p for p in results if p.ok]
     if not role_preds:
         # 全部角色失败/超时 → 空预判降级（不阻断澄清）。
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
 
     # 综合步：不扫项目，给更短超时。失败则确定性兜底合并。
     try:
@@ -175,7 +170,7 @@ def fanout_predict(*, roles, description, prior_qa, spec, project_path,
             synth_timeout)
         synth = parse_prediction(synth_out)
     except Exception:
-        synth = Prediction([], [])
-    if _is_empty(synth):
+        synth = Prediction([], [], ok=False)
+    if not synth.ok:
         return merge_predictions(role_preds)
     return synth

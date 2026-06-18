@@ -68,18 +68,18 @@ def parse_prediction(out):
     兼容旧式纯字符串问题、select 无候选项退化为 text、问题截断至 3 个。
     """
     if not out or not out.strip():
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
     # 引擎可能裹了 ```json ``` 或夹带前后文字，抓第一个 {...} 块。
     text = out.strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
     try:
         data = _json.loads(m.group(0))
     except (ValueError, TypeError):
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
     if not isinstance(data, dict):
-        return Prediction([], [])
+        return Prediction([], [], ok=False)
 
     def _as_list(v):
         if isinstance(v, list):

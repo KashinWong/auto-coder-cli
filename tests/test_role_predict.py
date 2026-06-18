@@ -172,6 +172,38 @@ def test_all_roles_fail_returns_empty_prediction():
                           spec=_SPEC, project_path="/p", timeout=180,
                           engine_capture=capture, synth_timeout=60)
     assert pred.modules == [] and pred.questions == []
+    assert pred.ok is False  # 全角色失败 → ok=False，不应立项
+
+
+def test_successful_fanout_has_ok_true():
+    """正常 fanout（有角色产出、综合成功）→ ok=True，可正常立项。"""
+    capture = _make_capture(
+        role_outputs={
+            "产品经理": _role_json(["a.py"], [("q1", "Q1?")]),
+            "架构师": _role_json(["b.py"], []),
+            "测试工程师": _role_json(["c.py"], []),
+        },
+        synth_output=json.dumps({
+            "modules": ["a.py", "b.py", "c.py"], "risks": [],
+            "scope_hint": "", "acceptance_hint": "",
+            "ready": False, "ready_reason": "",
+            "questions": [{"key": "q1", "ask": "Q1?", "type": "text"}],
+        }, ensure_ascii=False),
+    )
+    pred = fanout_predict(roles=_ROLES, description="需求", prior_qa=None,
+                          spec=_SPEC, project_path="/p", timeout=180,
+                          engine_capture=capture, synth_timeout=60)
+    assert pred.ok is True
+    assert len(pred.questions) == 1
+
+
+def test_empty_roles_defense_returns_ok_false():
+    """roles 为空时的防御分支返回 ok=False。"""
+    pred = fanout_predict(roles=[], description="需求", prior_qa=None,
+                          spec=_SPEC, project_path="/p", timeout=180,
+                          engine_capture=lambda *a, **k: "",
+                          synth_timeout=60)
+    assert pred.modules == [] and pred.ok is False
 
 
 def test_synth_failure_falls_back_to_merge():

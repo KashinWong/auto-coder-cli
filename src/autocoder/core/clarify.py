@@ -29,6 +29,7 @@ class Prediction:
     ready: bool = False         # AI 判定信息是否已足够立项
     ready_reason: str = ""      # AI 对 ready 与否的一句话说明
     questions: list = field(default_factory=list)  # list[Question]，本轮该问什么
+    ok: bool = True             # False=预判失败降级（引擎超时/崩溃/无输出），不应立项
 
 
 # 引擎可能抽风（连续判 not ready 却问不出新东西），用硬上限兜底防死循环。
@@ -59,6 +60,10 @@ class ClarifyOrchestrator:
         if trivial:
             return True
         if pred is None:
+            return False
+        # 预判失败降级（引擎超时/崩溃/无输出）→ 信息不足，继续澄清。
+        # 用 getattr 兼容未设 ok 字段的旧 Prediction（默认为 True，保持原行为）。
+        if not getattr(pred, "ok", True):
             return False
         # AI 判定够了，或它已问不出任何问题（无 pending）→ 立项。
         return bool(pred.ready) or not pred.questions

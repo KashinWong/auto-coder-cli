@@ -112,10 +112,10 @@ class Orchestrator:
         """
         from autocoder.core.clarify import Prediction
         if not project_path:
-            return Prediction([], [])
+            return Prediction([], [], ok=False)
         spec = self._predict_engine_spec(project_path)
         if not spec:
-            return Prediction([], [])
+            return Prediction([], [], ok=False)
         timeout = min(spec.get("timeout", 1800), 180)
         # 项目级 opt-in：配了 clarify_fanout.enabled 且有可用角色 → 多角色并行预判。
         # 否则走原有单次单角色路径（零额外引擎调用、零回归）。

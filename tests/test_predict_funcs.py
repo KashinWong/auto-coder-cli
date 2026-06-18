@@ -68,3 +68,12 @@ def test_parse_empty_or_garbage_returns_empty_prediction():
     for bad in ["", "   ", "no json here", "{not valid}"]:
         pred = parse_prediction(bad)
         assert pred.modules == [] and pred.questions == []
+        assert pred.ok is False
+
+
+def test_parse_success_sets_ok_true():
+    """成功解析的输出 ok=True（默认），与失败降级 ok=False 区分。"""
+    out = '{"modules": ["a.py"], "risks": [], "ready": false, "questions": []}'
+    pred = parse_prediction(out)
+    assert pred.ok is True
+    assert pred.modules == ["a.py"]
